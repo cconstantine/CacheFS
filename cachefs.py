@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
-
+import sqlite3
+import base64
 import time
 import os
 import stat
@@ -11,14 +12,24 @@ CACHE_FS_VERSION = '0.0.1'
 import fuse
 fuse.fuse_python_api = (0, 2)
 
+log_file = sys.stdout
+
 def debug(text):
-    """
+
     log_file.write(text)
     log_file.write('\n')
     log_file.flush()
-    """
-    pass
 
+def flag2mode(flags):
+    md = {os.O_RDONLY: 'r', os.O_WRONLY: 'w', os.O_RDWR: 'w+'}
+    m = md[flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)]
+
+    if flags | os.O_APPEND:
+        m = m.replace('w', 'a', 1)
+
+    return m
+
+cache = None
 
 
 STAT_ATTRIBUTES = (
@@ -38,29 +49,92 @@ class WritableStat(fuse.Stat):
         l = ', '.join(('%s=%s' % (k, v)) for k, v in sorted(d.items()))
         return '>>>> %s' % l
 
+    def check_permission(self, uid, gid, flags):
+        """
+        Checks the permission of a uid:gid with given flags.
+        Returns True for allowed, False for denied.
+        flags: As described in man 2 access (Linux Programmer's Manual).
+            Either os.F_OK (test for existence of file), or ORing of
+            os.R_OK, os.W_OK, os.X_OK (test if file is readable, writable and
+            executable, respectively. Must pass all tests).
+        """
+        if flags == os.F_OK:
+            return True
+        user = (self.st_mode & 0700) >> 6
+        group = (self.st_mode & 070) >> 3
+        other = self.st_mode & 07
+        if uid == self.st_uid:
+            # Use "user" permissions
+            mode = user | group | other
+        elif gid == self.st_gid:
+            # Use "group" permissions
+            # XXX This will only check the user's primary group. Don't we need
+            # to check all the groups this user is in?
+            mode = group | other
+        else:
+            # Use "other" permissions
+            mode = other
+        if flags & os.R_OK:
+            if mode & os.R_OK == 0:
+                return False
+        if flags & os.W_OK:
+            if mode & os.W_OK == 0:
+                return False
+        if flags & os.X_OK:
+            if uid == 0:
+                # Root has special privileges. May execute if anyone can.
+                if mode & 0111 == 0:
+                    return False
+            else:
+                if mode & os.X_OK == 0:
+                    return False
+        return True
 
 def make_file_class(file_system):
-    class RevealFile(object):
+    class CacheFile(object):
+        direct_io = False
+        keep_cache = True
+
         def __init__(self, path, flags, *mode):
             self.path = path
             try:
-                debug('>> file<%s>.open(flags=%d)' % (self.path, flags))
+                m = flag2mode(flags)
                 pp = file_system._physical_path(self.path)
-                if not os.path.exists(pp):
-                    e = OSError()
-                    e.errno = ENOENT
-                    raise e
-                self.f = open(pp, 'rb')
+                debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
+                self.f = open(pp, m)
+                self.cache = file_system.cache
             except Exception, e:
                 debug(str(e))
                 raise e
 
         def read(self, size, offset):
-            try:
-                debug('>> file<%s>.read(size=%d, offset=%d)' % (self.path, size, offset))
-                self.f.seek(offset)
-                buf = self.f.read(size)
+            
+            buf = None
+            for p, o, data in self.cache.execute(
+                u'''select * FROM cache WHERE path = ? and offset = ?''', 
+                [self.path, str(offset)]):
+                buf = base64.decodestring(data)
+                
+            if buf:
+                debug('>> file<%s>.read(size=%d, offset=%d)' % 
+                      ( self.path, size, offset))    
+                debug('>>> CACHE HIT')
                 return buf
+            
+            #debug('>>> CACHE MISS')
+            self.f.seek(offset)
+            buf = self.f.read(size)
+            self.cache.execute(
+                u'''insert into cache VALUES(?,?,?)''', [self.path, str(offset), base64.encodestring(buf)])
+            return buf
+        
+        def write(self, buf, offset):
+            try:
+                debug('>> file<%s>.write(size=%s, offset=%s)' % (
+                        self.path, len(buf), str(offset)))
+                self.f.seek(offset)
+                self.f.write(buf)
+                return True
             except Exception, e:
                 debug(str(e))
                 raise e
@@ -69,7 +143,7 @@ def make_file_class(file_system):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
             return 0
-    return RevealFile
+    return CacheFile
 
 
 class CacheFS(fuse.Fuse):
@@ -78,7 +152,7 @@ class CacheFS(fuse.Fuse):
         self.file_class = make_file_class(self)
 
     def _physical_path(self, path):
-        phys_path = os.path.join(self.source, path.lstrip('/'))
+        phys_path = os.path.join(self.target, path.lstrip('/'))
         return phys_path
 
     def getattr(self, path):
@@ -89,8 +163,7 @@ class CacheFS(fuse.Fuse):
 
            st = WritableStat(path, os.lstat(pp))  # lstat to not follow symlinks
            st.st_atime = int(time.time())
-           # Make read-only (http://docs.python.org/library/stat.html)
-           st.st_mode = st.st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+
            return st
         except Exception, e:
            debug(str(e))
@@ -112,28 +185,82 @@ class CacheFS(fuse.Fuse):
         return phys_resolved
 
 
+    def unlink(self, path):
+        path = self._physical_path(path)
+        debug('>> unlink("%s")' % path)
+        os.remove(path)
+        return 0
+
+    # Note: utime is deprecated in favour of utimens.
+    def utime(self, path, times):
+        """
+        Sets the access and modification times on a file.
+        times: (atime, mtime) pair. Both ints, in seconds since epoch.
+        Deprecated in favour of utimens.
+        """
+        debug('>> utime("%s", %s)' % (path, times))
+        os.utime(self._physical_path(path), times)
+        return 0
+
+    def access(self, path, flags):
+        path = self._physical_path(path)
+        os.access(path, flags)
+
+    def mkdir(self, path, mode):
+        path = self._physical_path(path)
+        os.mkdir(path, mode)
+        
+    def rmdir(self, path):
+        path = self._physical_path(path)
+        os.rmdir(path)
+
+    def symlink(self, target, name):
+        name = self._physical_path(name)
+        os.symlink(target, name)
+
+    def link(self, target, name):
+        name = self._physical_path(name)
+        target = self._physical_path(target)
+        os.link(target, name)
+        
 def main():
-    usage='%prog MOUNTPOINT -o source=SOURCE [options]'
+    usage='%prog MOUNTPOINT -o target=SOURCE cache=SOURCE [options]'
     server = CacheFS(version='CacheFS %s' % CACHE_FS_VERSION,
                      usage=usage,
                      dash_s_do='setsingle')
 
-    # Wire server.source to command line options
     server.parser.add_option(
-        mountopt="source", metavar="PATH",
+        mountopt="cache", metavar="PATH",
         default=None,
-        help="source path to reveal subsets from")
+        help="Path to place the cache")
+
+    # Wire server.target to command line options
+    server.parser.add_option(
+        mountopt="target", metavar="PATH",
+        default=None,
+        help="Path to be cached")
+
 
     server.parse(values=server, errex=1)
+    server.multithreaded = 0
     try:
-        server.source = os.path.abspath(server.source)
-    except AttributeError:
+        server.target = os.path.abspath(server.target)
+        cache = os.path.abspath(server.cache)
+        try:
+            os.remove(cache)
+        except OSError:
+            pass
+        server.cache = sqlite3.connect(cache)
+        server.cache.execute('create table cache (path string, offset string, data blobtype)')
+    except AttributeError as e:
+        print e
         server.parser.print_help()
         sys.exit(1)
 
-    print 'Setting up RevealFS %s ...' % CACHE_FS_VERSION
-    print '  Source      : %s' % server.source
-    print '  Destination : %s' % os.path.abspath(server.fuse_args.mountpoint)
+    print 'Setting up CacheFS %s ...' % CACHE_FS_VERSION
+    print '  Target       : %s' % server.target
+    print '  Cache        : %s' % server.cache
+    print '  Mount Point  : %s' % os.path.abspath(server.fuse_args.mountpoint)
     print
     print 'Unmount through:'
     print '  fusermount -u %s' % server.fuse_args.mountpoint

@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-import sqlite3
-import base64
+import shutil
 import time
 import os
 import stat
@@ -102,42 +101,43 @@ def make_file_class(file_system):
                 pp = file_system._physical_path(self.path)
                 debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
                 self.f = open(pp, m)
-                self.cache = file_system.cache
+                self.cache = file_system.cache + path
+                try:
+                    os.makedirs(self.cache)
+                except OSError:
+                    pass
             except Exception, e:
                 debug(str(e))
                 raise e
 
         def read(self, size, offset):
-            
-            buf = None
-            for p, o, data in self.cache.execute(
-                u'''select * FROM cache WHERE path = ? and offset = ?''', 
-                [self.path, str(offset)]):
-                buf = base64.decodestring(data)
-                
-            if buf:
-                debug('>> file<%s>.read(size=%d, offset=%d)' % 
-                      ( self.path, size, offset))    
-                debug('>>> CACHE HIT')
+            block_name = self.cache + '/' + str(offset)
+            debug(block_name)
+
+            try:
+                cf = open(block_name, 'rb')
+                debug(">> CACHE HIT")
+                return cf.read(size)
+            except IOError:
+                self.f.seek(offset)
+                buf = self.f.read(size)
+                cf = open(block_name, 'wb')
+                cf.write(buf)
+                cf.close()
+                debug(">> CACHE MISS")
                 return buf
-            
-            #debug('>>> CACHE MISS')
-            self.f.seek(offset)
-            buf = self.f.read(size)
-            self.cache.execute(
-                u'''insert into cache VALUES(?,?,?)''', [self.path, str(offset), base64.encodestring(buf)])
-            return buf
         
         def write(self, buf, offset):
-            try:
-                debug('>> file<%s>.write(size=%s, offset=%s)' % (
-                        self.path, len(buf), str(offset)))
-                self.f.seek(offset)
-                self.f.write(buf)
-                return True
-            except Exception, e:
-                debug(str(e))
-                raise e
+            block_name = self.cache + '/' + str(offset)
+            cf = open(block_name, 'wb')
+            cf.write(buf)
+            cf.close()
+
+            debug('>> file<%s>.write(size=%s, offset=%s)' % (
+                    self.path, len(buf), str(offset)))
+            self.f.seek(offset)
+            self.f.write(buf)
+            return True
 
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
@@ -242,16 +242,10 @@ def main():
 
 
     server.parse(values=server, errex=1)
-    server.multithreaded = 0
     try:
         server.target = os.path.abspath(server.target)
-        cache = os.path.abspath(server.cache)
-        try:
-            os.remove(cache)
-        except OSError:
-            pass
-        server.cache = sqlite3.connect(cache)
-        server.cache.execute('create table cache (path string, offset string, data blobtype)')
+        server.cache = os.path.abspath(server.cache)
+        os.mkdir(server.cache)
     except AttributeError as e:
         print e
         server.parser.print_help()

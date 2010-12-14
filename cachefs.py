@@ -36,6 +36,36 @@ STAT_ATTRIBUTES = (
     "st_gid", "st_ino", "st_mode", "st_mtime", "st_nlink",
     "st_rdev", "st_size", "st_uid")
 
+class CacheMiss(Exception):
+    def __init__(self):
+        debug(">> CACHE MISS")
+    pass
+
+class FileDataCache:
+    def __init__(self, cachebase, path):
+        self.cacheDir = cachebase + path
+        try:
+            os.makedirs(self.cacheDir)
+        except OSError:
+            pass
+
+    def read(self, size, offset):
+        block_name = self.cacheDir + '/' + str(offset)
+        debug(block_name)
+        try:
+            cf = open(block_name, 'rb')
+            return cf.read(size)
+        except IOError:
+            raise CacheMiss
+
+    def update(self, buff, offset):
+        block_name = self.cacheDir + '/' + str(offset)
+
+        cf = open(block_name, 'wb')
+        cf.write(buff)
+        cf.close()
+        
+
 class WritableStat(fuse.Stat):
     def __init__(self, path, readonly_stat):
         self.path = path
@@ -96,35 +126,19 @@ def make_file_class(file_system):
 
         def __init__(self, path, flags, *mode):
             self.path = path
-            try:
-                m = flag2mode(flags)
-                pp = file_system._physical_path(self.path)
-                debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
-                self.f = open(pp, m)
-                self.cache = file_system.cache + path
-                try:
-                    os.makedirs(self.cache)
-                except OSError:
-                    pass
-            except Exception, e:
-                debug(str(e))
-                raise e
+            m = flag2mode(flags)
+            pp = file_system._physical_path(self.path)
+            debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
+            self.f = open(pp, m)
+            self.cache = FileDataCache(file_system.cache, path)
 
         def read(self, size, offset):
-            block_name = self.cache + '/' + str(offset)
-            debug(block_name)
-
             try:
-                cf = open(block_name, 'rb')
-                debug(">> CACHE HIT")
-                return cf.read(size)
-            except IOError:
+                return self.cache.read(size, offset)
+            except CacheMiss:
                 self.f.seek(offset)
                 buf = self.f.read(size)
-                cf = open(block_name, 'wb')
-                cf.write(buf)
-                cf.close()
-                debug(">> CACHE MISS")
+                self.cache.update(buf, offset)
                 return buf
         
         def write(self, buf, offset):
@@ -245,7 +259,12 @@ def main():
     try:
         server.target = os.path.abspath(server.target)
         server.cache = os.path.abspath(server.cache)
-        os.mkdir(server.cache)
+        try:
+            os.mkdir(server.cache)
+        except OSError:
+            shutil.rmtree(server.cache)
+            os.mkdir(server.cache)
+        
     except AttributeError as e:
         print e
         server.parser.print_help()

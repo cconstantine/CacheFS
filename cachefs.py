@@ -14,10 +14,10 @@ fuse.fuse_python_api = (0, 2)
 log_file = sys.stdout
 
 def debug(text):
-
-    log_file.write(text)
-    log_file.write('\n')
-    log_file.flush()
+    pass
+#    log_file.write(text)
+#    log_file.write('\n')
+#    log_file.flush()
 
 def flag2mode(flags):
     md = {os.O_RDONLY: 'r', os.O_WRONLY: 'w', os.O_RDWR: 'w+'}
@@ -43,28 +43,37 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        self.cacheDir = cachebase + path
+        self.cacheDir = os.path.join(cachebase, path)
+        self.known_offsets = {}
         try:
             os.makedirs(self.cacheDir)
         except OSError:
             pass
 
+    def __overlapping_block__(self, offset):
+        for addr, size in self.known_offsets.items():
+            if offset >= addr and offset < addr + size:
+                return (addr, size)
+        return (None, None)
+
     def read(self, size, offset):
-        block_name = self.cacheDir + '/' + str(offset)
-        debug(block_name)
-        try:
-            cf = open(block_name, 'rb')
-            return cf.read(size)
-        except IOError:
+        (addr, s) = self.__overlapping_block__(offset)
+        if addr == None:
             raise CacheMiss
+
+        block_name = self.cacheDir + '/' + str(addr)
+        debug(block_name)
+        cf = open(block_name, 'rb')
+        cf.seek(offset - addr)
+        return cf.read(size)
 
     def update(self, buff, offset):
         block_name = self.cacheDir + '/' + str(offset)
-
+        
         cf = open(block_name, 'wb')
         cf.write(buff)
         cf.close()
-        
+        self.known_offsets[offset] = len(buff)
 
 class WritableStat(fuse.Stat):
     def __init__(self, path, readonly_stat):

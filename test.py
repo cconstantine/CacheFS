@@ -2,6 +2,7 @@
 import random
 import unittest
 import shutil
+import os
 from cachefs import FileDataCache, CacheMiss
 
 class TestFileDataCache(unittest.TestCase):
@@ -55,6 +56,14 @@ class TestFileDataCache(unittest.TestCase):
         
         self.assertData(cache, data[1:], 1)
 
+    @fdc
+    def test_sparce_file(self, cache):
+        data = bytes(range(10))
+        seek_to = 1000000000000
+        cache.update(data, seek_to)
+        cache.cache.flush()
+        st = os.stat(cache.cache.name)
+        self.assertTrue( seek_to > st.st_blocks * st.st_blksize)
 
 if __name__ == '__main__':
     unittest.main()

@@ -43,12 +43,15 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        self.cacheDir = os.path.join(cachebase, path)
-        self.known_offsets = {}
+        full_path = os.path.join(cachebase, path)
+
         try:
-            os.makedirs(self.cacheDir)
+            os.makedirs(os.path.dirname(full_path))
         except OSError:
             pass
+
+        self.cache = open(full_path, "w+")
+        self.known_offsets = {}
 
     def __overlapping_block__(self, offset):
         for addr, size in self.known_offsets.items():
@@ -58,21 +61,15 @@ class FileDataCache:
 
     def read(self, size, offset):
         (addr, s) = self.__overlapping_block__(offset)
-        if addr == None:
+        if addr == None or addr + s < offset + size:
             raise CacheMiss
 
-        block_name = self.cacheDir + '/' + str(addr)
-        debug(block_name)
-        cf = open(block_name, 'rb')
-        cf.seek(offset - addr)
-        return cf.read(size)
+        self.cache.seek(offset)
+        return self.cache.read(size)
 
     def update(self, buff, offset):
-        block_name = self.cacheDir + '/' + str(offset)
-        
-        cf = open(block_name, 'wb')
-        cf.write(buff)
-        cf.close()
+        self.cache.seek(offset)
+        self.cache.write(buff)
         self.known_offsets[offset] = len(buff)
 
 class WritableStat(fuse.Stat):

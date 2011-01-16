@@ -6,8 +6,7 @@ import os
 import stat
 import errno
 import sys
-#import sqlite3
-#sqlite3.threadsafety = True
+
 CACHE_FS_VERSION = '0.0.1'
 import fuse
 fuse.fuse_python_api = (0, 2)
@@ -43,7 +42,7 @@ class CacheMiss(Exception):
     pass
 
 class FileDataCache:
-    def __init__(self, cachebase, path):#, metadata):
+    def __init__(self, cachebase, path):
         full_path = cachebase + path
 
         try:
@@ -54,7 +53,7 @@ class FileDataCache:
         self.path = path
         self.cache = open(full_path, "w+")
         self.known_offsets = {}
-#        self.metadata = metadata
+
         self.misses = 0
         self.hits = 0
 
@@ -70,13 +69,6 @@ class FileDataCache:
         self.cache.close()
 
     def __overlapping_block__(self, path, offset):
-#        for offset, ol in self.metadata.execute(
-#            'SELECT offset, off_len FROM data_blocks WHERE ' +
-#            'path = ? AND offset <= ? AND off_len > ?', [self.path,
-#                                                     offset,
-#                                                     offset]):
-#            return (offset, ol-offset)
-
         for addr, size in self.known_offsets.items():
             if offset >= addr and offset < addr + size:
                 return (addr, size)
@@ -96,11 +88,6 @@ class FileDataCache:
         self.cache.seek(offset)
         self.cache.write(buff)
         self.known_offsets[offset] = len(buff)
-#        self.metadata.execute(
-#            'INSERT INTO data_blocks VALUES (?, ?, ?)', [self.path,
-#                                                         offset,
-#                                                         offset+len(buff)])
-#        self.metadata.commit()
 
 class WritableStat(fuse.Stat):
     def __init__(self, path, readonly_stat):
@@ -213,8 +200,7 @@ class CacheFS(fuse.Fuse):
             return self.caches[path]
         except:
             self.caches[path] = c = FileDataCache(self.cache, 
-                                                 path)#, 
-                              #file_system.metadata)
+                                                 path)
             return c
             
 
@@ -320,9 +306,6 @@ def main():
             os.mkdir(server.cache)
         except OSError:
             pass
-#        server.metadata = sqlite3.connect(os.path.join(server.cache, ".metadata"))
-#        server.metadata.execute(
-#            'CREATE TABLE IF NOT EXISTS data_blocks (path string, offset INTEGER, off_len INTEGER)')
 
     except AttributeError as e:
         print e

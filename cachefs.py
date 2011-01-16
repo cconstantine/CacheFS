@@ -264,12 +264,19 @@ def main():
     server.parse(values=server, errex=1)
     try:
         server.target = os.path.abspath(server.target)
-        server.cache = os.path.abspath(server.cache)
+        try:
+            cache_dir = server.cache
+        except:
+            import hashlib
+            cache_dir = os.path.join(os.path.expanduser("~"),
+                                     ".cachefs",
+                                     hashlib.md5(server.target).hexdigest())
+
+        server.cache = os.path.abspath(cache_dir)
         try:
             os.mkdir(server.cache)
         except OSError:
-            shutil.rmtree(server.cache)
-            os.mkdir(server.cache)
+            pass
         
     except AttributeError as e:
         print e

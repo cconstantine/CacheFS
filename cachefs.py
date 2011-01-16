@@ -43,7 +43,7 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        full_path = os.path.join(cachebase, path)
+        full_path = cachebase + path
 
         try:
             os.makedirs(os.path.dirname(full_path))
@@ -52,6 +52,12 @@ class FileDataCache:
 
         self.cache = open(full_path, "w+")
         self.known_offsets = {}
+
+    def __del__(self):
+        self.close
+
+    def close(self):
+        self.cache.close()
 
     def __overlapping_block__(self, offset):
         for addr, size in self.known_offsets.items():
@@ -162,7 +168,9 @@ def make_file_class(file_system):
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
+            self.cache.close()
             return 0
+
     return CacheFile
 
 

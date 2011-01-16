@@ -6,7 +6,8 @@ import os
 import stat
 import errno
 import sys
-
+#import sqlite3
+#sqlite3.threadsafety = True
 CACHE_FS_VERSION = '0.0.1'
 import fuse
 fuse.fuse_python_api = (0, 2)
@@ -42,7 +43,7 @@ class CacheMiss(Exception):
     pass
 
 class FileDataCache:
-    def __init__(self, cachebase, path):
+    def __init__(self, cachebase, path):#, metadata):
         full_path = cachebase + path
 
         try:
@@ -50,26 +51,44 @@ class FileDataCache:
         except OSError:
             pass
 
+        self.path = path
         self.cache = open(full_path, "w+")
         self.known_offsets = {}
+#        self.metadata = metadata
+        self.misses = 0
+        self.hits = 0
+
+    def report(self):
+        print ">> %s Hits: %d, Misses: %d, Rate: %f%%" % (
+            self.path, self.hits, self.misses, 100*float(self.hits)/self.misses)
 
     def __del__(self):
         self.close
 
     def close(self):
+
         self.cache.close()
 
-    def __overlapping_block__(self, offset):
+    def __overlapping_block__(self, path, offset):
+#        for offset, ol in self.metadata.execute(
+#            'SELECT offset, off_len FROM data_blocks WHERE ' +
+#            'path = ? AND offset <= ? AND off_len > ?', [self.path,
+#                                                     offset,
+#                                                     offset]):
+#            return (offset, ol-offset)
+
         for addr, size in self.known_offsets.items():
             if offset >= addr and offset < addr + size:
                 return (addr, size)
         return (None, None)
 
     def read(self, size, offset):
-        (addr, s) = self.__overlapping_block__(offset)
+        (addr, s) = self.__overlapping_block__(self.path, offset)
         if addr == None or addr + s < offset + size:
+            self.misses += 1
             raise CacheMiss
-
+        
+        self.hits += 1
         self.cache.seek(offset)
         return self.cache.read(size)
 
@@ -77,6 +96,11 @@ class FileDataCache:
         self.cache.seek(offset)
         self.cache.write(buff)
         self.known_offsets[offset] = len(buff)
+#        self.metadata.execute(
+#            'INSERT INTO data_blocks VALUES (?, ?, ?)', [self.path,
+#                                                         offset,
+#                                                         offset+len(buff)])
+#        self.metadata.commit()
 
 class WritableStat(fuse.Stat):
     def __init__(self, path, readonly_stat):
@@ -142,7 +166,7 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.cache = FileDataCache(file_system.cache, path)
+            self.cache = file_system._file_cache(path)
 
         def read(self, size, offset):
             try:
@@ -168,7 +192,7 @@ def make_file_class(file_system):
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
-            self.cache.close()
+            self.cache.report()
             return 0
 
     return CacheFile
@@ -178,10 +202,21 @@ class CacheFS(fuse.Fuse):
     def __init__(self, *args, **kwargs):
         fuse.Fuse.__init__(self, *args, **kwargs)
         self.file_class = make_file_class(self)
+        self.caches = {}
 
     def _physical_path(self, path):
         phys_path = os.path.join(self.target, path.lstrip('/'))
         return phys_path
+
+    def _file_cache(self, path):
+        try:
+            return self.caches[path]
+        except:
+            self.caches[path] = c = FileDataCache(self.cache, 
+                                                 path)#, 
+                              #file_system.metadata)
+            return c
+            
 
     def getattr(self, path):
         try:
@@ -279,13 +314,16 @@ def main():
             cache_dir = os.path.join(os.path.expanduser("~"),
                                      ".cachefs",
                                      hashlib.md5(server.target).hexdigest())
-
+        server.multithreaded = 0
         server.cache = os.path.abspath(cache_dir)
         try:
             os.mkdir(server.cache)
         except OSError:
             pass
-        
+#        server.metadata = sqlite3.connect(os.path.join(server.cache, ".metadata"))
+#        server.metadata.execute(
+#            'CREATE TABLE IF NOT EXISTS data_blocks (path string, offset INTEGER, off_len INTEGER)')
+
     except AttributeError as e:
         print e
         server.parser.print_help()

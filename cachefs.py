@@ -36,59 +36,6 @@ STAT_ATTRIBUTES = (
     "st_gid", "st_ino", "st_mode", "st_mtime", "st_nlink",
     "st_rdev", "st_size", "st_uid")
 
-class CacheMiss(Exception):
-    def __init__(self):
-        debug(">> CACHE MISS")
-    pass
-
-class FileDataCache:
-    def __init__(self, cachebase, path):
-        full_path = cachebase + path
-
-        try:
-            os.makedirs(os.path.dirname(full_path))
-        except OSError:
-            pass
-
-        self.path = path
-        self.cache = open(full_path, "w+")
-        self.known_offsets = {}
-
-        self.misses = 0
-        self.hits = 0
-
-    def report(self):
-        print ">> %s Hits: %d, Misses: %d, Rate: %f%%" % (
-            self.path, self.hits, self.misses, 100*float(self.hits)/self.misses)
-
-    def __del__(self):
-        self.close
-
-    def close(self):
-
-        self.cache.close()
-
-    def __overlapping_block__(self, path, offset):
-        for addr, size in self.known_offsets.items():
-            if offset >= addr and offset < addr + size:
-                return (addr, size)
-        return (None, None)
-
-    def read(self, size, offset):
-        (addr, s) = self.__overlapping_block__(self.path, offset)
-        if addr == None or addr + s < offset + size:
-            self.misses += 1
-            raise CacheMiss
-        
-        self.hits += 1
-        self.cache.seek(offset)
-        return self.cache.read(size)
-
-    def update(self, buff, offset):
-        self.cache.seek(offset)
-        self.cache.write(buff)
-        self.known_offsets[offset] = len(buff)
-
 class WritableStat(fuse.Stat):
     def __init__(self, path, readonly_stat):
         self.path = path
@@ -141,6 +88,97 @@ class WritableStat(fuse.Stat):
                 if mode & os.X_OK == 0:
                     return False
         return True
+
+class CacheMiss(Exception):
+    def __init__(self):
+        debug(">> CACHE MISS")
+    pass
+
+class FileDataCache:
+    def __init__(self, cachebase, path):
+        full_path = cachebase + path
+
+        try:
+            os.makedirs(os.path.dirname(full_path))
+        except OSError:
+            pass
+
+        self.path = path
+        self.cache = open(full_path, "w+")
+        self.known_offsets = {}
+
+        self.misses = 0
+        self.hits = 0
+
+    def report(self):
+        rate = 0.0
+        if self.hits + self.misses:
+            rate = 100*float(self.hits)/(self.hits + self.misses)
+        import pprint
+        pprint.pprint(self.known_offsets)
+        print ">> %s Hits: %d, Misses: %d, Rate: %f%%" % (
+            self.path, self.hits, self.misses, rate)
+
+    def __del__(self):
+        self.close
+
+    def close(self):
+
+        self.cache.close()
+
+    def __overlapping_block__(self, path, offset):
+        for addr, size in self.known_offsets.items():
+            if offset >= addr and offset < addr + size:
+                return (addr, size)
+        return (None, None)
+
+    def __add_block___(self, offset, length):
+        last_byte = offset + length
+
+        last_addr = None
+        inserted = False
+        for addr in sorted(self.known_offsets.keys()):
+            size = self.known_offsets[addr]
+
+            # new block starts before block
+            if offset < addr:
+                # new block ends in or after block
+                if last_byte >= addr:
+                    del self.known_offsets[addr]
+                    if last_addr != None:
+                        offset = last_addr
+                        
+                    length = max(addr + size, last_byte) - offset
+                    last_byte = offset + length
+                    inserted = False
+
+            elif offset >= addr and offset <= addr + size:
+                self.known_offsets[addr] = max(addr + size, last_byte) - addr
+                inserted = True
+                last_addr  = addr
+                
+                
+        # new block not colatable
+        if not inserted:
+            self.known_offsets[offset] = length
+        return
+
+    def read(self, size, offset):
+        (addr, s) = self.__overlapping_block__(self.path, offset)
+        if addr == None or addr + s < offset + size:
+            self.misses += 1
+            raise CacheMiss
+        
+        self.hits += 1
+        self.cache.seek(offset)
+        return self.cache.read(size)
+
+    def update(self, buff, offset):
+        self.cache.seek(offset)
+        self.cache.write(buff)
+        self.__add_block___(offset, len(buff))
+
+
 
 def make_file_class(file_system):
     class CacheFile(object):

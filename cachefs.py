@@ -6,6 +6,7 @@ import os
 import stat
 import errno
 import sys
+import simplejson
 
 CACHE_FS_VERSION = '0.0.1'
 import fuse
@@ -96,16 +97,37 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        full_path = cachebase + path
+        full_path = os.path.join(cachebase, "file_data" + path)
+        self.meta_data = os.path.join(
+            cachebase, "file_meta" + path + ".json")
 
         try:
             os.makedirs(os.path.dirname(full_path))
         except OSError:
             pass
+        try:
+            os.makedirs(os.path.dirname(self.meta_data))
+        except OSError:
+            pass
 
         self.path = path
-        self.cache = open(full_path, "w+")
+        try:
+            self.cache = open(full_path, "r+")
+        except:
+            self.cache = open(full_path, "w+")
+            
+
         self.known_offsets = {}
+        try:
+            self.meta_data = os.path.join(
+                cachebase, "file_meta" + path + ".json")
+        
+            doc = simplejson.load(open(self.meta_data))
+            for k, v in doc.items():
+                self.known_offsets[int(k)] = v
+
+        except Exception as e:
+            pass
 
         self.misses = 0
         self.hits = 0
@@ -178,6 +200,8 @@ class FileDataCache:
         self.cache.write(buff)
         self.__add_block___(offset, len(buff))
 
+    def release(self):
+        simplejson.dump(self.known_offsets, open(self.meta_data, "w"))
 
 
 def make_file_class(file_system):
@@ -203,21 +227,18 @@ def make_file_class(file_system):
                 return buf
         
         def write(self, buf, offset):
-            block_name = self.cache + '/' + str(offset)
-            cf = open(block_name, 'wb')
-            cf.write(buf)
-            cf.close()
-
             debug('>> file<%s>.write(size=%s, offset=%s)' % (
                     self.path, len(buf), str(offset)))
             self.f.seek(offset)
             self.f.write(buf)
+            self.cache.update(buf, offset)
             return True
 
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
             self.cache.report()
+            self.cache.release()
             return 0
 
     return CacheFile

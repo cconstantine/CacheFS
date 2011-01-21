@@ -145,7 +145,6 @@ class FileDataCache:
         self.close
 
     def close(self):
-
         self.cache.close()
 
     def __overlapping_block__(self, path, offset):
@@ -215,7 +214,7 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.cache = file_system._file_cache(path)
+            self.cache =  FileDataCache(file_system.cache, path)
 
         def read(self, size, offset):
             try:
@@ -253,15 +252,6 @@ class CacheFS(fuse.Fuse):
     def _physical_path(self, path):
         phys_path = os.path.join(self.target, path.lstrip('/'))
         return phys_path
-
-    def _file_cache(self, path):
-        try:
-            return self.caches[path]
-        except:
-            self.caches[path] = c = FileDataCache(self.cache, 
-                                                 path)
-            return c
-            
 
     def getattr(self, path):
         try:

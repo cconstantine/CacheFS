@@ -58,6 +58,7 @@ class WritableStat(fuse.Stat):
             os.R_OK, os.W_OK, os.X_OK (test if file is readable, writable and
             executable, respectively. Must pass all tests).
         """
+        return True
         if flags == os.F_OK:
             return True
         user = (self.st_mode & 0700) >> 6
@@ -97,16 +98,12 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        full_path = os.path.join(cachebase, "file_data" + path)
-        self.meta_data = os.path.join(
-            cachebase, "file_meta" + path + ".json")
+        self.cache_dir = cachebase + path
+        full_path = os.path.join(self.cache_dir, "file_data")
+        self.meta_data = os.path.join(self.cache_dir, "file_meta.json")
 
         try:
-            os.makedirs(os.path.dirname(full_path))
-        except OSError:
-            pass
-        try:
-            os.makedirs(os.path.dirname(self.meta_data))
+            os.makedirs(self.cache_dir)
         except OSError:
             pass
 
@@ -119,9 +116,6 @@ class FileDataCache:
 
         self.known_offsets = {}
         try:
-            self.meta_data = os.path.join(
-                cachebase, "file_meta" + path + ".json")
-        
             doc = simplejson.load(open(self.meta_data))
             for k, v in doc.items():
                 self.known_offsets[int(k)] = v
@@ -147,7 +141,7 @@ class FileDataCache:
     def close(self):
         self.cache.close()
 
-    def __overlapping_block__(self, path, offset):
+    def __overlapping_block__(self, offset):
         for addr, size in self.known_offsets.items():
             if offset >= addr and offset < addr + size:
                 return (addr, size)
@@ -185,29 +179,82 @@ class FileDataCache:
         return
 
     def read(self, size, offset):
-        (addr, s) = self.__overlapping_block__(self.path, offset)
+        (addr, s) = self.__overlapping_block__(offset)
         if addr == None or addr + s < offset + size:
             self.misses += 1
             raise CacheMiss
-        
+    
         self.hits += 1
         self.cache.seek(offset)
         return self.cache.read(size)
 
     def update(self, buff, offset):
+        print(">> update at %s, len(%s)" % (offset, len(buff)))
         self.cache.seek(offset)
         self.cache.write(buff)
         self.__add_block___(offset, len(buff))
 
     def release(self):
         simplejson.dump(self.known_offsets, open(self.meta_data, "w"))
+        
+    @staticmethod
+    def unlink(cache_base, path):
+        try:
+            shutil.rmtree(cache_base + path)
+        except:
+            pass
 
+    @staticmethod
+    def rmdir(cache_base, path):
+        try:
+            shutil.rmtree(cache_base + path) 
+        except:
+            pass
+
+    @staticmethod
+    def symlink(cache_base, target, name):
+        cache_target = cache_base + target
+        cache_name = cache_base + name
+
+        try:
+            os.makedirs(os.path.dirname(cache_name))
+        except OSError:
+            pass
+        
+        os.symlink(cache_target, cache_name)
+
+    @staticmethod
+    def link(cache_base, target, name):
+        cache_target = cache_base + target
+        cache_name = cache_base + name
+        try:
+            os.makedirs(cache_name)
+        except OSError:
+            pass
+
+        try:
+            os.makedirs(cache_target)
+        except OSError:
+            pass
+
+        for f in ("file_data", "file_meta.json"):
+            target_file = os.path.join(cache_target, f)
+
+            #make sure target exists
+            open(target_file, "a+").close()
+        
+            os.link(target_file, os.path.join(cache_name, f))
+
+
+    @staticmethod
+    def rename(cache_base, old_name, new_name):
+        os.rename(cache_base + old_name, cache_base + new_name)
 
 def make_file_class(file_system):
     class CacheFile(object):
         direct_io = False
         keep_cache = True
-
+    
         def __init__(self, path, flags, *mode):
             self.path = path
             m = flag2mode(flags)
@@ -215,23 +262,26 @@ def make_file_class(file_system):
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
             self.cache =  FileDataCache(file_system.cache, path)
-
+        
         def read(self, size, offset):
             try:
-                return self.cache.read(size, offset)
+                buf = self.cache.read(size, offset)
             except CacheMiss:
                 self.f.seek(offset)
                 buf = self.f.read(size)
                 self.cache.update(buf, offset)
-                return buf
+            return buf
         
         def write(self, buf, offset):
-            debug('>> file<%s>.write(size=%s, offset=%s)' % (
+            print('>> file<%s>.write(size=%s, offset=%s)' % (
                     self.path, len(buf), str(offset)))
+
+            self.cache.update(buf, offset)
+
             self.f.seek(offset)
             self.f.write(buf)
-            self.cache.update(buf, offset)
             return len(buf)
+
 
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
@@ -242,16 +292,15 @@ def make_file_class(file_system):
 
         def flush(self):
             self.f.flush()
-            
+        
 
     return CacheFile
-
 
 class CacheFS(fuse.Fuse):
     def __init__(self, *args, **kwargs):
         fuse.Fuse.__init__(self, *args, **kwargs)
-        self.file_class = make_file_class(self)
         self.caches = {}
+        self.file_class = make_file_class(self)
 
     def _physical_path(self, path):
         phys_path = os.path.join(self.target, path.lstrip('/'))
@@ -288,9 +337,9 @@ class CacheFS(fuse.Fuse):
 
 
     def unlink(self, path):
-        path = self._physical_path(path)
         debug('>> unlink("%s")' % path)
-        os.remove(path)
+        os.remove(self._physical_path(path))
+        FileDataCache.unlink(self.cache, path)
         return 0
 
     # Note: utime is deprecated in favour of utimens.
@@ -313,17 +362,21 @@ class CacheFS(fuse.Fuse):
         os.mkdir(path, mode)
         
     def rmdir(self, path):
-        path = self._physical_path(path)
-        os.rmdir(path)
+        os.rmdir( self._physical_path(path) )
+        FileDataCache.rmdir(self.cache, path)
 
     def symlink(self, target, name):
-        name = self._physical_path(name)
-        os.symlink(target, name)
+        os.symlink(self._physical_path(target), self._physical_path(name))
+        FileDataCache.symlink(self.cache, target, name)
 
     def link(self, target, name):
-        name = self._physical_path(name)
-        target = self._physical_path(target)
-        os.link(target, name)
+        os.link(self._physical_path(target), self._physical_path(name))
+        FileDataCache.link(self.cache, target, name)
+
+    def rename(self, old_name, new_name):
+        os.rename(self._physical_path(old_name),
+                  self._physical_path(new_name))
+        FileDataCache.rename(self.cache, old_name, new_name)
         
 def main():
     usage='%prog MOUNTPOINT -o target=SOURCE cache=SOURCE [options]'

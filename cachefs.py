@@ -231,7 +231,7 @@ def make_file_class(file_system):
             self.f.seek(offset)
             self.f.write(buf)
             self.cache.update(buf, offset)
-            return True
+            return len(buf)
 
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
@@ -239,6 +239,10 @@ def make_file_class(file_system):
             self.cache.report()
             self.cache.release()
             return 0
+
+        def flush(self):
+            self.f.flush()
+            
 
     return CacheFile
 

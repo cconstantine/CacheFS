@@ -212,9 +212,12 @@ class TestFileDataCache(unittest.TestCase):
 
         return True
 
-    def verify_add_blocks(self, cache, inputs, results):
+    def verify_add_blocks(self, cache, inputs, results, truncate = None):
         for space, bytes in inputs:
             cache.update(bytes, len(space))
+
+        if truncate:
+            cache.truncate(truncate)
 
         try:
             self.assertTrue(len(cache.known_offsets) == len(results))
@@ -278,6 +281,41 @@ class TestFileDataCache(unittest.TestCase):
         results= {'': b'543212345678901234567890'}
         
         self.verify_add_blocks(cache, inputs, results)
+
+    @fdc
+    def test_add_truncate_1(self, cache):
+        inputs = (('', b'54321'),
+                  ('             ', b'54321'),
+                  ('    ', b'12345678901234567890'))
+        truncate = len('            ')    
+        results = {'': b'543212345678'}
+        
+        self.verify_add_blocks(cache, inputs, results, truncate)
+
+    @fdc
+    def test_add_truncate_2(self, cache):
+        inputs = (('', b'54321'),
+                  ('             ', b'54321'))
+        truncate =  len('      ')    
+        results = {'': b'54321'}
+
+    @fdc
+    def test_add_truncate_3(self, cache):
+        inputs = (('', b'54321'),
+                  ('             ', b'54321'))
+        truncate =  len('              ')    
+        results = {'': b'54321',
+                   '             ': b'5'}
+    @fdc
+    def test_add_truncate_4(self, cache):
+        inputs = (('', b'54321'),
+                  ('             ', b'54321'))
+        truncate =  len('                  ')    
+        results = {'': b'54321',
+                   '             ': b'54321'}
+        
+        
+        self.verify_add_blocks(cache, inputs, results, truncate)
 
 if __name__ == '__main__':
     unittest.main()

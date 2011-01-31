@@ -58,7 +58,7 @@ class WritableStat(fuse.Stat):
             os.R_OK, os.W_OK, os.X_OK (test if file is readable, writable and
             executable, respectively. Must pass all tests).
         """
-        return True
+
         if flags == os.F_OK:
             return True
         user = (self.st_mode & 0700) >> 6
@@ -189,14 +189,23 @@ class FileDataCache:
         return self.cache.read(size)
 
     def update(self, buff, offset):
-        print(">> update at %s, len(%s)" % (offset, len(buff)))
         self.cache.seek(offset)
         self.cache.write(buff)
         self.__add_block___(offset, len(buff))
 
     def release(self):
         simplejson.dump(self.known_offsets, open(self.meta_data, "w"))
-        
+
+    def truncate(self, len):
+        self.cache.truncate(len)
+
+        for addr, size in self.known_offsets.items():
+            if addr + size > len:
+                if addr >= len:
+                    del self.known_offsets[addr]
+                else:
+                    self.known_offsets[addr] = len - addr
+
     @staticmethod
     def unlink(cache_base, path):
         try:
@@ -250,6 +259,10 @@ class FileDataCache:
     def rename(cache_base, old_name, new_name):
         os.rename(cache_base + old_name, cache_base + new_name)
 
+
+        
+
+
 def make_file_class(file_system):
     class CacheFile(object):
         direct_io = False
@@ -273,9 +286,6 @@ def make_file_class(file_system):
             return buf
         
         def write(self, buf, offset):
-            print('>> file<%s>.write(size=%s, offset=%s)' % (
-                    self.path, len(buf), str(offset)))
-
             self.cache.update(buf, offset)
 
             self.f.seek(offset)
@@ -292,7 +302,6 @@ def make_file_class(file_system):
 
         def flush(self):
             self.f.flush()
-        
 
     return CacheFile
 
@@ -308,7 +317,6 @@ class CacheFS(fuse.Fuse):
 
     def getattr(self, path):
         try:
-           debug('>> getattr("' + path + '")')
            pp = self._physical_path(path)
            # Hide non-public files (except root)
 
@@ -319,6 +327,7 @@ class CacheFS(fuse.Fuse):
         except Exception, e:
            debug(str(e))
            raise e
+
 
     def readdir(self, path, offset):
         phys_path = self._physical_path(path).rstrip('/') + '/'
@@ -378,6 +387,24 @@ class CacheFS(fuse.Fuse):
                   self._physical_path(new_name))
         FileDataCache.rename(self.cache, old_name, new_name)
         
+    def chmod(self, path, mode):
+        os.chmod(self._physical_path(path), mode)
+        
+    def chown(self, path, user, group):
+        os.chown(self._physical_path(path), user, group)
+	
+    def truncate(self, path, len):
+        print "TRUNCATE"
+        f = open(self._physical_path(path), "a")
+        f.truncate(len)
+        f.close()
+
+        cache = FileDataCache(self.cache, path)
+        cache.truncate(len)
+        cache.release()
+
+
+
 def main():
     usage='%prog MOUNTPOINT -o target=SOURCE cache=SOURCE [options]'
     server = CacheFS(version='CacheFS %s' % CACHE_FS_VERSION,

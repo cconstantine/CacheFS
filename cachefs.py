@@ -6,7 +6,7 @@ import os
 import stat
 import errno
 import sys
-import simplejson
+import sqlite3
 
 CACHE_FS_VERSION = '0.0.1'
 import fuse
@@ -97,114 +97,129 @@ class CacheMiss(Exception):
     pass
 
 class FileDataCache:
-    def __init__(self, cachebase, path):
-        self.cache_dir = cachebase + path
-        full_path = os.path.join(self.cache_dir, "file_data")
-        self.meta_data = os.path.join(self.cache_dir, "file_meta.json")
+    def __init__(self, db, cachebase, path):
+        self.full_path = os.path.join(cachebase, "file_data") + path
 
         try:
-            os.makedirs(self.cache_dir)
+            os.makedirs(os.path.dirname(self.full_path))
         except OSError:
             pass
 
         self.path = path
-        try:
-            self.cache = open(full_path, "r+")
-        except:
-            self.cache = open(full_path, "w+")
-            
-
-        self.known_offsets = {}
-        try:
-            doc = simplejson.load(open(self.meta_data))
-            for k, v in doc.items():
-                self.known_offsets[int(k)] = v
-
-        except Exception as e:
-            pass
+        self.db = db
+        self.cache = None
+        self.open()
 
         self.misses = 0
         self.hits = 0
+
+    def known_offsets(self):
+        ret = {}
+        c = self.db.cursor()
+        c.execute('select offset, end from file_data where path = ?', (self.path,))
+        for offset, end in c:
+            ret[offset] = end - offset
+
+        return ret
+
+    def set_offsets(self, dic):
+        self.db.execute('delete from file_data where path = ?', (self.path,))
+        for k, v in dic.iteritems():
+            self.db.execute('insert into file_data values (?, ?, ?)', (self.path, k, k+v))
+    
+
+    def open(self):
+        if self.cache == None:
+            try:
+                self.cache = open(self.full_path, "r+")
+            except:
+                self.cache = open(self.full_path, "w+")
+
 
     def report(self):
         rate = 0.0
         if self.hits + self.misses:
             rate = 100*float(self.hits)/(self.hits + self.misses)
         import pprint
-        pprint.pprint(self.known_offsets)
+        pprint.pprint(self.known_offsets())
         print ">> %s Hits: %d, Misses: %d, Rate: %f%%" % (
             self.path, self.hits, self.misses, rate)
 
     def __del__(self):
-        self.close
+        self.close()
 
     def close(self):
-        self.cache.close()
+        if self.cache:
+            self.cache.close()
+            self.cache = None
+            self.db.commit()
+
+
+    def __conditions__(self, offset, length = None):
+        if length != None:
+            return ["path = ? AND (offset = ? OR "
+                    "(offset > ? AND offset <= ?) OR (offset < ? AND end >= ?))",
+                    (self.path,
+                     offset,
+                     offset, offset + length,
+                     offset, offset)]
+        else:
+            return ["path = ? AND offset <= ? AND end > ?",
+                    (self.path,            offset,     offset)]
 
     def __overlapping_block__(self, offset):
-        for addr, size in self.known_offsets.items():
-            if offset >= addr and offset < addr + size:
-                return (addr, size)
+        conditions = self.__conditions__(offset)
+                      
+        query = "select offset, end from file_data where %s" % conditions[0]
+        for db_offset, db_end in self.db.execute(query, conditions[1]):
+            return (db_offset, db_end - db_offset)
         return (None, None)
 
     def __add_block___(self, offset, length):
-        last_byte = offset + length
+        end = offset + length
 
-        last_addr = None
-        inserted = False
-        for addr in sorted(self.known_offsets.keys()):
-            size = self.known_offsets[addr]
+        conditions = self.__conditions__(offset, length)
+        query = "select min(offset), max(end) from file_data where %s" % conditions[0]
+        for db_offset, db_end in self.db.execute(query, conditions[1]):
+            if db_offset == None or db_end == None:
+                continue
+            offset = min(offset, db_offset)
+            end = max(end, db_end)
 
-            # new block starts before block
-            if offset < addr:
-                # new block ends in or after block
-                if last_byte >= addr:
-                    del self.known_offsets[addr]
-                    if last_addr != None:
-                        offset = last_addr
-                        
-                    length = max(addr + size, last_byte) - offset
-                    last_byte = offset + length
-                    inserted = False
+        self.db.execute("delete from file_data where %s" % conditions[0], conditions[1])
+        self.db.execute('insert into file_data values (?, ?, ?)', (self.path, offset, end))
 
-            elif offset >= addr and offset <= addr + size:
-                self.known_offsets[addr] = max(addr + size, last_byte) - addr
-                inserted = True
-                last_addr  = addr
-                
-                
-        # new block not colatable
-        if not inserted:
-            self.known_offsets[offset] = length
         return
 
     def read(self, size, offset):
+        #print ">>> READ (size: %s, offset: %s" % (size, offset)
+        self.open()
         (addr, s) = self.__overlapping_block__(offset)
         if addr == None or addr + s < offset + size:
-            self.misses += 1
+            self.misses += size
             raise CacheMiss
     
-        self.hits += 1
+        self.hits += size
         self.cache.seek(offset)
         return self.cache.read(size)
 
     def update(self, buff, offset):
+        #print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
         self.cache.seek(offset)
         self.cache.write(buff)
         self.__add_block___(offset, len(buff))
 
     def release(self):
-        simplejson.dump(self.known_offsets, open(self.meta_data, "w"))
+        pass
+        self.close()
 
     def truncate(self, len):
         self.cache.truncate(len)
 
-        for addr, size in self.known_offsets.items():
-            if addr + size > len:
-                if addr >= len:
-                    del self.known_offsets[addr]
-                else:
-                    self.known_offsets[addr] = len - addr
+        
+        self.db.execute("DELETE FROM file_data WHERE path = ? AND offset >= ?", (self.path, len))
+        self.db.execute("UPDATE file_data SET end = ? WHERE path = ? AND end > ?", (len, self.path, len))
+        return
 
     @staticmethod
     def unlink(cache_base, path):
@@ -257,6 +272,7 @@ class FileDataCache:
 
     @staticmethod
     def rename(cache_base, old_name, new_name):
+        shutil.rmtree(cache_base + new_name) 
         os.rename(cache_base + old_name, cache_base + new_name)
 
 
@@ -266,7 +282,7 @@ class FileDataCache:
 def make_file_class(file_system):
     class CacheFile(object):
         direct_io = False
-        keep_cache = True
+        keep_cache = False
     
         def __init__(self, path, flags, *mode):
             self.path = path
@@ -274,19 +290,19 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.cache =  FileDataCache(file_system.cache, path)
-        
+            self.data_cache = file_system.path_cache(path)
+
         def read(self, size, offset):
             try:
-                buf = self.cache.read(size, offset)
+                buf = self.data_cache.read(size, offset)
             except CacheMiss:
                 self.f.seek(offset)
                 buf = self.f.read(size)
-                self.cache.update(buf, offset)
+                self.data_cache.update(buf, offset)
             return buf
         
         def write(self, buf, offset):
-            self.cache.update(buf, offset)
+            self.data_cache.update(buf, offset)
 
             self.f.seek(offset)
             self.f.write(buf)
@@ -296,8 +312,8 @@ def make_file_class(file_system):
         def release(self, flags):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
-            self.cache.report()
-            self.cache.release()
+            self.data_cache.report()
+            self.data_cache.release()
             return 0
 
         def flush(self):
@@ -308,13 +324,22 @@ def make_file_class(file_system):
 class CacheFS(fuse.Fuse):
     def __init__(self, *args, **kwargs):
         fuse.Fuse.__init__(self, *args, **kwargs)
-        self.caches = {}
         self.file_class = make_file_class(self)
+        self.caches = {}
 
     def _physical_path(self, path):
         phys_path = os.path.join(self.target, path.lstrip('/'))
         return phys_path
 
+    def path_cache(self, path):
+        try:
+            return self.caches[path]
+        except:
+            fdc = FileDataCache(self.cache_db, self.cache, path)
+            self.caches[path] = fdc
+            return fdc
+        
+    
     def getattr(self, path):
         try:
            pp = self._physical_path(path)
@@ -386,6 +411,7 @@ class CacheFS(fuse.Fuse):
         os.rename(self._physical_path(old_name),
                   self._physical_path(new_name))
         FileDataCache.rename(self.cache, old_name, new_name)
+        FileDataCache.rename(self.cache, old_name)
         
     def chmod(self, path, mode):
         os.chmod(self._physical_path(path), mode)
@@ -394,7 +420,6 @@ class CacheFS(fuse.Fuse):
         os.chown(self._physical_path(path), user, group)
 	
     def truncate(self, path, len):
-        print "TRUNCATE"
         f = open(self._physical_path(path), "a")
         f.truncate(len)
         f.close()
@@ -403,6 +428,12 @@ class CacheFS(fuse.Fuse):
         cache.truncate(len)
         cache.release()
 
+
+def create_db(cache_dir):
+    cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"))
+    cache_db.execute('create table if not exists file_data (path string, offset integer, end integer)')
+    cache_db.execute('create index if not exists meta on file_data (path, offset, end)')
+    return cache_db
 
 
 def main():
@@ -439,6 +470,10 @@ def main():
             os.mkdir(server.cache)
         except OSError:
             pass
+
+        server.cache_db = create_db(server)
+
+        
 
     except AttributeError as e:
         print e

@@ -3,13 +3,15 @@ import random
 import unittest
 import shutil
 import os
-from cachefs import FileDataCache, CacheMiss
+from cachefs import FileDataCache, CacheMiss, create_db
 
 class TestFileDataCache(unittest.TestCase):
 
     #decorator to give tests a cache object
     def fdc(f):
-        return lambda s: f.__call__(s, FileDataCache(s.cache_base, '/'+f.__name__))
+        func = lambda s: f.__call__(s, FileDataCache(create_db(s.cache_base), s.cache_base, '/'+f.__name__))
+        func.__name__ = f.__name__
+        return func
 
     def assertData(self, cache, data, offset = 0):
         self.assertEqual(cache.read(len(data), offset), data)
@@ -20,6 +22,7 @@ class TestFileDataCache(unittest.TestCase):
             shutil.rmtree(self.cache_base)
         except OSError:
             pass
+        os.mkdir(self.cache_base)
 
     @fdc
     def test_simple_update_read(self, cache):
@@ -32,22 +35,36 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data, 0)
         cache.update(data, len(data))
 
-        self.assertData(cache, data, 0)
-        self.assertData(cache, data, len(data))
+        try:
+            self.assertData(cache, data, 0)
+            self.assertData(cache, data, len(data))
+        except:
+            print "\nData: %s\nlen: %d" % (data, len(data))
+            print "olb: ", cache.__overlapping_block__(len(data))
+            cache.report()
+            raise
 
     @fdc
     def test_simple_miss(self, cache):
-        self.assertRaises(CacheMiss, 
-                          cache.read, cache, (1, 0))
+        try:
+            cache.read(1, 0)
+        except CacheMiss:
+            self.assertTrue(True)
+            return
+        self.assertTrue(False)
 
 
     @fdc
     def test_not_enough_data_mss(self, cache):
         data = bytes(range(10))
         cache.update(data, 0)
+        try:
+            cache.read(2*len(data), 0)
+        except CacheMiss:
+            self.assertTrue(True)
+            return
+        self.assertTrue(False)
 
-        self.assertRaises(CacheMiss, 
-                          cache.read, cache, (2*len(data), 0))
         
     @fdc
     def test_inner_read(self, cache):
@@ -75,8 +92,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 10)
         cache.update(data2, 5)
 
-        self.assertTrue(len(cache.known_offsets) == 1)
-        self.assertTrue(cache.known_offsets[5] == 15)
+        self.assertTrue(len(cache.known_offsets()) == 1)
+        self.assertTrue(cache.known_offsets()[5] == 15)
 
         self.assertTrue(cache.read(15, 5) == result)
 
@@ -89,8 +106,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 10)
         cache.update(data2, 5)
 
-        self.assertTrue(len(cache.known_offsets) == 1)
-        self.assertTrue(cache.known_offsets[5] == len(result))
+        self.assertTrue(len(cache.known_offsets()) == 1)
+        self.assertTrue(cache.known_offsets()[5] == len(result))
 
         self.assertTrue(cache.read(len(result), 5) == result)
 
@@ -103,8 +120,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 10)
         cache.update(data2, 5)
         try:
-            self.assertTrue(len(cache.known_offsets) == 1)
-            self.assertTrue(cache.known_offsets[5] == len(result))
+            self.assertTrue(len(cache.known_offsets()) == 1)
+            self.assertTrue(cache.known_offsets()[5] == len(result))
             
             self.assertTrue(cache.read(len(result), 5) == result)
         except:
@@ -120,9 +137,9 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 11)
         cache.update(data2, 5)
         try:
-            self.assertTrue(len(cache.known_offsets) == 2)
+            self.assertTrue(len(cache.known_offsets()) == 2)
             for result, offset in results: 
-                self.assertTrue(cache.known_offsets[offset] == len(result))
+                self.assertTrue(cache.known_offsets()[offset] == len(result))
                 
                 self.assertTrue(cache.read(len(result), offset) == result)
         except:
@@ -138,8 +155,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 0)
         cache.update(data2, 0)
         try:
-            self.assertTrue(len(cache.known_offsets) == 1)
-            self.assertTrue(cache.known_offsets[0] == len(result))
+            self.assertTrue(len(cache.known_offsets()) == 1)
+            self.assertTrue(cache.known_offsets()[0] == len(result))
             
             self.assertTrue(cache.read(len(result), 0) == result)
         except:
@@ -155,8 +172,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 0)
         cache.update(data2, 3)
         try:
-            self.assertTrue(len(cache.known_offsets) == 1)
-            self.assertTrue(cache.known_offsets[0] == len(result))
+            self.assertTrue(len(cache.known_offsets()) == 1)
+            self.assertTrue(cache.known_offsets()[0] == len(result))
             
             self.assertTrue(cache.read(len(result), 0) == result)
         except:
@@ -172,8 +189,8 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data1, 0)
         cache.update(data2, 5)
         try:
-            self.assertTrue(len(cache.known_offsets) == 1)
-            self.assertTrue(cache.known_offsets[0] == len(result))
+            self.assertTrue(len(cache.known_offsets()) == 1)
+            self.assertTrue(cache.known_offsets()[0] == len(result))
             
             self.assertTrue(cache.read(len(result), 0) == result)
         except:
@@ -193,9 +210,9 @@ class TestFileDataCache(unittest.TestCase):
         cache.update(data2, 17)
         cache.update(data3, 10)
         try:
-            self.assertTrue(len(cache.known_offsets) == 2)
+            self.assertTrue(len(cache.known_offsets()) == 2)
             for result, offset in results: 
-                self.assertTrue(cache.known_offsets[offset] == len(result))
+                self.assertTrue(cache.known_offsets()[offset] == len(result))
                 
                 self.assertTrue(cache.read(len(result), offset) == result)
         except:
@@ -220,12 +237,12 @@ class TestFileDataCache(unittest.TestCase):
             cache.truncate(truncate)
 
         try:
-            self.assertTrue(len(cache.known_offsets) == len(results))
+            self.assertTrue(len(cache.known_offsets()) == len(results))
             
             for space, result in results.items():
                 try:
                     offset = len(space)
-                    self.assertTrue(cache.known_offsets[offset] == len(result))
+                    self.assertTrue(cache.known_offsets()[offset] == len(result))
                     self.assertTrue(self.cmp_bufs(cache.read(len(result), 
                                                              offset), 
                                                   result))

@@ -7,9 +7,15 @@ from cachefs import FileDataCache, CacheMiss
 
 class TestFileDataCache(unittest.TestCase):
 
+
     #decorator to give tests a cache object
     def fdc(f):
-        return lambda s: f.__call__(s, FileDataCache(s.cache_base, '/'+f.__name__))
+        def test_func(s):
+            cache = FileDataCache(s.cache_base, '/'+f.__name__)
+            f.__call__(s, cache)
+            cache.release()
+            
+        return test_func
 
     def assertData(self, cache, data, offset = 0):
         self.assertEqual(cache.read(len(data), offset), data)
@@ -20,6 +26,8 @@ class TestFileDataCache(unittest.TestCase):
             shutil.rmtree(self.cache_base)
         except OSError:
             pass
+
+        os.mkdir(self.cache_base)
 
     @fdc
     def test_simple_update_read(self, cache):

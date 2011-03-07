@@ -98,28 +98,32 @@ class CacheMiss(Exception):
 
 class FileDataCache:
     def __init__(self, cachebase, path):
-        self.cache_dir = cachebase + path
-        full_path = os.path.join(self.cache_dir, "file_data")
-        self.meta_data = os.path.join(self.cache_dir, "file_meta.json")
+        self.full_path = os.path.join(cachebase, "file_data") + path
+        self.meta_path = os.path.join(cachebase, "meta_data") + path + ".json"
 
         try:
-            os.makedirs(self.cache_dir)
+             os.makedirs(os.path.dirname(self.full_path))
+        except OSError:
+            pass
+
+        try:
+             os.makedirs(os.path.dirname(self.meta_path))
         except OSError:
             pass
 
         self.path = path
         try:
-            self.cache = open(full_path, "r+")
+            self.cache = open(self.full_path, "r+")
         except:
-            self.cache = open(full_path, "w+")
+            self.cache = open(self.full_path, "w+")
             
 
-        self.known_offsets = {}
+        self.meta_data = {"offsets": {}}
+        self.known_offsets = self.meta_data["offsets"]
         try:
-            doc = simplejson.load(open(self.meta_data))
-            for k, v in doc.items():
+            doc = simplejson.load(open(self.meta_path))
+            for k, v in doc["offsets"].items():
                 self.known_offsets[int(k)] = v
-
         except Exception as e:
             pass
 
@@ -191,10 +195,11 @@ class FileDataCache:
     def update(self, buff, offset):
         self.cache.seek(offset)
         self.cache.write(buff)
+        self.cache.flush()
         self.__add_block___(offset, len(buff))
 
     def release(self):
-        simplejson.dump(self.known_offsets, open(self.meta_data, "w"))
+        simplejson.dump(self.meta_data, open(self.meta_path, "w"))
 
     def truncate(self, len):
         self.cache.truncate(len)
@@ -274,7 +279,7 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.cache =  FileDataCache(file_system.cache, path)
+            self.cache = FileDataCache(file_system.cache, path)
         
         def read(self, size, offset):
             try:
@@ -308,7 +313,6 @@ def make_file_class(file_system):
 class CacheFS(fuse.Fuse):
     def __init__(self, *args, **kwargs):
         fuse.Fuse.__init__(self, *args, **kwargs)
-        self.caches = {}
         self.file_class = make_file_class(self)
 
     def _physical_path(self, path):

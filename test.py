@@ -349,5 +349,7 @@ class TestFileDataCache(unittest.TestCase):
             cache.read(0, 10)
 
 if __name__ == '__main__':
-    unittest.main()
+    import profile
+    profile.run('unittest.main()')
+#    unittest.main()
 

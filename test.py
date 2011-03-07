@@ -344,7 +344,7 @@ class TestFileDataCache(unittest.TestCase):
         
         self.verify_add_blocks(cache, inputs, results)
 
-        for i in range(1000000):
+        for i in range(1000):
             cache.read(0, 10)
 
 if __name__ == '__main__':

@@ -9,7 +9,7 @@ class TestFileDataCache(unittest.TestCase):
 
     #decorator to give tests a cache object
     def fdc(f):
-        func = lambda s: f.__call__(s, FileDataCache(create_db(s.cache_base), s.cache_base, '/'+f.__name__))
+        func = lambda s: f.__call__(s, FileDataCache(s.db, s.cache_base, '/'+f.__name__))
         func.__name__ = f.__name__
         return func
 
@@ -18,6 +18,7 @@ class TestFileDataCache(unittest.TestCase):
         
     def setUp(self):
         self.cache_base = ".test_dir"
+        self.db = create_db(self.cache_base)
         try:
             shutil.rmtree(self.cache_base)
         except OSError:

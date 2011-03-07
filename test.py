@@ -334,6 +334,19 @@ class TestFileDataCache(unittest.TestCase):
         
         self.verify_add_blocks(cache, inputs, results, truncate)
 
+    @fdc
+    def test_perf(self, cache):
+        inputs = (('', b'54321'),
+                  ('             ', b'54321'),
+                  ('    ', b'1234567890'))
+        
+        results= {'':  b'543212345678904321'}
+        
+        self.verify_add_blocks(cache, inputs, results)
+
+        for i in range(1000000):
+            cache.read(0, 10)
+
 if __name__ == '__main__':
     unittest.main()
 

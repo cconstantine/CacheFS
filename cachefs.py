@@ -122,12 +122,6 @@ class FileDataCache:
 
         return ret
 
-    def set_offsets(self, dic):
-        self.db.execute('delete from file_data where path = ?', (self.path,))
-        for k, v in dic.iteritems():
-            self.db.execute('insert into file_data values (?, ?, ?)', (self.path, k, k+v))
-    
-
     def open(self):
         if self.cache == None:
             try:
@@ -430,10 +424,11 @@ class CacheFS(fuse.Fuse):
 
 
 def create_db(cache_dir):
-    cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"))
+    cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"), isolation_level="DEFERRED")
     cache_db.execute('create table if not exists file_data (path string, offset integer, end integer)')
-    #cache_db.execute('create index if not exists meta on file_data (path, offset, end)') 
+    cache_db.execute('create index if not exists meta on file_data (path, offset, end)') 
     cache_db.execute("PRAGMA synchronous=OFF")
+    cache_db.execute("PRAGMA journal_mode=OFF")
     return cache_db
 
 

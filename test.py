@@ -5,6 +5,8 @@ import shutil
 import os
 from cachefs import FileDataCache, CacheMiss, create_db
 
+db = create_db(".test_dir")
+
 class TestFileDataCache(unittest.TestCase):
 
     #decorator to give tests a cache object
@@ -18,7 +20,7 @@ class TestFileDataCache(unittest.TestCase):
         
     def setUp(self):
         self.cache_base = ".test_dir"
-        self.db = create_db(self.cache_base)
+        self.db = db
         try:
             shutil.rmtree(self.cache_base)
         except OSError:
@@ -345,11 +347,11 @@ class TestFileDataCache(unittest.TestCase):
         
         self.verify_add_blocks(cache, inputs, results)
 
-        for i in range(1000):
+        for i in range(100000):
             cache.read(0, 10)
 
 if __name__ == '__main__':
-    import profile
-    profile.run('unittest.main()')
-#    unittest.main()
+    import cProfile
+    cProfile.run('unittest.main()')
+    unittest.main()
 

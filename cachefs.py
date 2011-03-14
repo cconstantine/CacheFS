@@ -165,7 +165,8 @@ class FileDataCache:
         conditions = self.__conditions__(offset)
                       
         query = "select offset, end from file_data where %s" % conditions[0]
-        for db_offset, db_end in self.db.execute(query, conditions[1]):
+        result = self.db.execute(query, conditions[1])
+        for db_offset, db_end in result:
             return (db_offset, db_end - db_offset)
         return (None, None)
 

@@ -6,7 +6,8 @@ import os
 import stat
 import errno
 import sys
-import simplejson
+import doc
+import itertools
 
 CACHE_FS_VERSION = '0.0.1'
 import fuse
@@ -97,36 +98,10 @@ class CacheMiss(Exception):
     pass
 
 class FileDataCache:
-    def __init__(self, cachebase, path):
-        self.full_path = os.path.join(cachebase, "file_data") + path
-        self.meta_path = os.path.join(cachebase, "meta_data") + path + ".json"
-
-        try:
-             os.makedirs(os.path.dirname(self.full_path))
-        except OSError:
-            pass
-
-        try:
-             os.makedirs(os.path.dirname(self.meta_path))
-        except OSError:
-            pass
-
-        self.path = path
-        try:
-            self.cache = open(self.full_path, "r+")
-        except:
-            self.cache = open(self.full_path, "w+")
+    def __init__(self, db, bs=4096):
+        self.db = db
+        self.bs = bs
             
-
-        self.meta_data = {"offsets": {}}
-        self.known_offsets = self.meta_data["offsets"]
-        try:
-            doc = simplejson.load(open(self.meta_path))
-            for k, v in doc["offsets"].items():
-                self.known_offsets[int(k)] = v
-        except Exception as e:
-            pass
-
         self.misses = 0
         self.hits = 0
 
@@ -134,53 +109,14 @@ class FileDataCache:
         rate = 0.0
         if self.hits + self.misses:
             rate = 100*float(self.hits)/(self.hits + self.misses)
-        import pprint
-        pprint.pprint(self.known_offsets)
         print ">> %s Hits: %d, Misses: %d, Rate: %f%%" % (
             self.path, self.hits, self.misses, rate)
 
     def __del__(self):
-        self.close
+        self.close()
 
     def close(self):
-        self.cache.close()
-
-    def __overlapping_block__(self, offset):
-        for addr, size in self.known_offsets.items():
-            if offset >= addr and offset < addr + size:
-                return (addr, size)
-        return (None, None)
-
-    def __add_block___(self, offset, length):
-        last_byte = offset + length
-
-        last_addr = None
-        inserted = False
-        for addr in sorted(self.known_offsets.keys()):
-            size = self.known_offsets[addr]
-
-            # new block starts before block
-            if offset < addr:
-                # new block ends in or after block
-                if last_byte >= addr:
-                    del self.known_offsets[addr]
-                    if last_addr != None:
-                        offset = last_addr
-                        
-                    length = max(addr + size, last_byte) - offset
-                    last_byte = offset + length
-                    inserted = False
-
-            elif offset >= addr and offset <= addr + size:
-                self.known_offsets[addr] = max(addr + size, last_byte) - addr
-                inserted = True
-                last_addr  = addr
-                
-                
-        # new block not colatable
-        if not inserted:
-            self.known_offsets[offset] = length
-        return
+        self.db.sync()
 
     def read(self, size, offset):
         (addr, s) = self.__overlapping_block__(offset)
@@ -192,14 +128,36 @@ class FileDataCache:
         self.cache.seek(offset)
         return self.cache.read(size)
 
-    def update(self, buff, offset):
-        self.cache.seek(offset)
-        self.cache.write(buff)
-        self.cache.flush()
-        self.__add_block___(offset, len(buff))
+    def update(self, buf, offset):
+        while len(buf):
+            bo = (offset / self.bs) * self.bs
+            inset = offset - bo
+            length = min(self.bs-inset, len(buf))
+            end = inset + length
+
+            node = self.db.get("%016x"%bo, {})
+
+            node["inset"] = min(node.get('inset', self.bs),
+                                inset)
+            node["end"] = max(node.get('end', 0),
+                                 end)
+
+            try:
+                block = node['block']
+            except:
+                block = bytearray(itertools.repeat(0, self.bs))
+
+
+            block[inset:end] = buf[:length]
+
+            node['block'] = block
+
+            #setup for next round
+            buf = buf[length:]
+            offset += length
 
     def release(self):
-        simplejson.dump(self.meta_data, open(self.meta_path, "w"))
+        self.meta_data.sync()
 
     def truncate(self, len):
         self.cache.truncate(len)
@@ -265,9 +223,6 @@ class FileDataCache:
         os.rename(cache_base + old_name, cache_base + new_name)
 
 
-        
-
-
 def make_file_class(file_system):
     class CacheFile(object):
         direct_io = False
@@ -279,7 +234,12 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.cache = FileDataCache(file_system.cache, path)
+            try:
+                file_meta = file_system.meta_data[path]
+            except:
+                file_meta = file_system.meta_data[path] = {}
+
+            self.cache = FileDataCache(file_meta, file_system.cache, path)
         
         def read(self, size, offset):
             try:
@@ -398,12 +358,11 @@ class CacheFS(fuse.Fuse):
         os.chown(self._physical_path(path), user, group)
 	
     def truncate(self, path, len):
-        print "TRUNCATE"
         f = open(self._physical_path(path), "a")
         f.truncate(len)
         f.close()
 
-        cache = FileDataCache(self.cache, path)
+        cache = FileDataCache({}, self.cache, path)
         cache.truncate(len)
         cache.release()
 
@@ -443,6 +402,8 @@ def main():
             os.mkdir(server.cache)
         except OSError:
             pass
+
+        server.meta_data = doc.doc(os.path.join(server.cache, "meta_data.db"))
 
     except AttributeError as e:
         print e

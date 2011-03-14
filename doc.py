@@ -1,5 +1,6 @@
 import gdbm
 import os
+import pickle
 
 class doc:
     def __init__(self, filename=None, db=None, key=""):
@@ -7,7 +8,7 @@ class doc:
         if db != None:
             self.db = db
         elif filename != None:
-            self.db = gdbm.open(filename, "nf")
+            self.db = gdbm.open(filename, "cf")
         else:
             raise Exception("Must give a db or a filename")
         self.db[self.key] = ''
@@ -15,7 +16,7 @@ class doc:
 
     def __setitem__(self, k, val):
         if type(k).__name__!='str':
-            raise Exception("Key must be a string")
+            raise Exception("Key must be a string (%s)", k)
 
         keys = k.split('/')
         while len(keys) > 1:
@@ -32,13 +33,13 @@ class doc:
             for k,v in val.iteritems():
                 a[k] = v
         else:
-            self.db[path] = val
+            self.db[path] = pickle.dumps(val)
 
     def __getitem__(self, k):
         path = os.path.join(self.key, k)
         try:
             r = self.db[path] 
-            return r
+            return pickle.loads(r)
         except:
             try:
                 if self.db[path+'/'] == '':
@@ -64,6 +65,13 @@ class doc:
             raise 
 
         
+    def get(self, k, default):
+        try:
+            node = self[k]
+        except:
+            self[k] = default
+            node = self[k]
+        return node
         
     def close(self):
         self.db.close()

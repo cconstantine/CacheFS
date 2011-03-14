@@ -5,7 +5,10 @@ import shutil
 import os
 from cachefs import FileDataCache, CacheMiss
 import shelve
+import doc
+import pickle
 import random
+import itertools
 cache_base = ".test_dir"
 
 try:
@@ -14,10 +17,65 @@ except OSError:
     pass
 
 os.mkdir(cache_base)
-
-meta_data = shelve.open(os.path.join(cache_base, "meta.db"))
+#meta_data = doc.doc(os.path.join(cache_base, "meta.db"))
 
 class TestFileDataCache(unittest.TestCase):
+
+    def check_block(self, offset, inset, buf):
+        block = bytearray(itertools.repeat(0, self.bs))
+        length = min(self.bs-inset, len(buf))
+        end = inset + length
+        block[inset:end] = buf
+
+        off = "%016x"%offset
+
+        self.assertEqual(self.db[off]['inset'], inset)
+        self.assertEqual(self.db[off]['end'], inset+len(buf))
+        self.assertEqual(self.db[off]['block'], block)
+
+    def setUp(self):
+        path = os.path.join(cache_base, self._testMethodName + ".db")
+
+        self.bs = 10
+        self.db = doc.doc(path)
+        self.cache = FileDataCache(self.db, self.bs)
+
+    def test_simple_update(self):
+        buf = bytearray(range(10))
+        self.cache.update(buf, 0)
+
+        self.check_block(0, 0, buf)
+
+    def test_simple_inset_update(self):
+        buf = bytearray(range(5))
+        self.cache.update(buf, 3)
+        
+        self.check_block(0, 3, buf)
+
+    def test_simple_longer_update(self):
+        buf = bytearray(range(20))
+        self.cache.update(buf, 0)
+        
+        self.check_block(0, 0, buf[:self.bs])
+        self.check_block(10, 0, buf[self.bs:])
+
+    def test_simple_longer_update(self):
+        buf = bytearray(range(15))
+        self.cache.update(buf, 3)
+        
+        self.check_block(0, 3, buf[:self.bs-3])
+        self.check_block(10, 0, buf[self.bs-3:])
+
+    def test_multi_inset_update(self):
+        buf1 = bytearray(range(5))
+        buf2 = bytearray(range(5))
+        buf3 = bytearray([0,1,2,3,4,2, 3, 4])
+        self.cache.update(buf1, 3)
+        self.cache.update(buf2, 0)
+        
+        self.check_block(0, 0, buf3)
+
+class TestFileDataCacheOld():
     #decorator to give tests a cache object
     def setUp(self):
         self.cache = FileDataCache(meta_data, cache_base, '/%s'%random.randrange(0, 1000))

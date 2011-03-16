@@ -111,12 +111,9 @@ class FileDataCache:
         self.open()
 
         self.path_id = None
-        for pid, in self.db.execute('select id from paths where path = ?', (self.path,)):
-            self.path_id = pid
 
-        if self.path_id == None:
-            self.db.execute('INSERT INTO paths values (NULL,?)', (self.path,))
-        
+        self.db.execute('INSERT OR IGNORE INTO paths values (NULL,?)', (self.path,))
+
         for pid, in self.db.execute('select id from paths where path = ?', (self.path,)):
             self.path_id = pid
 
@@ -436,7 +433,10 @@ class CacheFS(fuse.Fuse):
 
 def create_db(cache_dir):
     cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"), isolation_level="DEFERRED")
-    cache_db.execute('create table if not exists paths (id  INTEGER PRIMARY KEY, path STRING)')
+    cache_db.execute('create table if not exists paths (id  INTEGER PRIMARY KEY, path STRING, UNIQUE(path))')
+    cache_db.execute('create index if not exists path_index on paths (path)') 
+
+
     cache_db.execute('create table if not exists file_data ( path_id INTEGER  not null, offset integer, end integer, FOREIGN KEY(path_id) REFERENCES paths(id) )')
     cache_db.execute('create index if not exists meta on file_data (path_id, offset, end)') 
     cache_db.execute("PRAGMA synchronous=OFF")

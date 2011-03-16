@@ -110,13 +110,23 @@ class FileDataCache:
         self.cache = None
         self.open()
 
+        self.path_id = None
+        for pid, in self.db.execute('select id from paths where path = ?', (self.path,)):
+            self.path_id = pid
+
+        if self.path_id == None:
+            self.db.execute('INSERT INTO paths values (NULL,?)', (self.path,))
+        
+        for pid, in self.db.execute('select id from paths where path = ?', (self.path,)):
+            self.path_id = pid
+
         self.misses = 0
         self.hits = 0
 
     def known_offsets(self):
         ret = {}
         c = self.db.cursor()
-        c.execute('select offset, end from file_data where path = ?', (self.path,))
+        c.execute('select offset, end from file_data where path_id = ?', (self.path_id,))
         for offset, end in c:
             ret[offset] = end - offset
 
@@ -151,15 +161,15 @@ class FileDataCache:
 
     def __conditions__(self, offset, length = None):
         if length != None:
-            return ["path = ? AND (offset = ? OR "
+            return ["path_id = ? AND (offset = ? OR "
                     "(offset > ? AND offset <= ?) OR (offset < ? AND end >= ?))",
-                    (self.path,
+                    (self.path_id,
                      offset,
                      offset, offset + length,
                      offset, offset)]
         else:
-            return ["path = ? AND offset <= ? AND end > ?",
-                    (self.path,            offset,     offset)]
+            return ["path_id = ? AND offset <= ? AND end > ?",
+                    (self.path_id,            offset,     offset)]
 
     def __overlapping_block__(self, offset):
         conditions = self.__conditions__(offset)
@@ -182,7 +192,7 @@ class FileDataCache:
             end = max(end, db_end)
 
         self.db.execute("delete from file_data where %s" % conditions[0], conditions[1])
-        self.db.execute('insert into file_data values (?, ?, ?)', (self.path, offset, end))
+        self.db.execute('insert into file_data values (?, ?, ?)', (self.path_id, offset, end))
 
         return
 
@@ -212,8 +222,8 @@ class FileDataCache:
         self.cache.truncate(len)
 
         
-        self.db.execute("DELETE FROM file_data WHERE path = ? AND offset >= ?", (self.path, len))
-        self.db.execute("UPDATE file_data SET end = ? WHERE path = ? AND end > ?", (len, self.path, len))
+        self.db.execute("DELETE FROM file_data WHERE path_id = ? AND offset >= ?", (self.path_id, len))
+        self.db.execute("UPDATE file_data SET end = ? WHERE path_id = ? AND end > ?", (len, self.path_id, len))
         return
 
     @staticmethod
@@ -426,8 +436,9 @@ class CacheFS(fuse.Fuse):
 
 def create_db(cache_dir):
     cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"), isolation_level="DEFERRED")
-    cache_db.execute('create table if not exists file_data (path string, offset integer, end integer)')
-    cache_db.execute('create index if not exists meta on file_data (path, offset, end)') 
+    cache_db.execute('create table if not exists paths (id  INTEGER PRIMARY KEY, path STRING)')
+    cache_db.execute('create table if not exists file_data ( path_id INTEGER  not null, offset integer, end integer, FOREIGN KEY(path_id) REFERENCES paths(id) )')
+    cache_db.execute('create index if not exists meta on file_data (path_id, offset, end)') 
     cache_db.execute("PRAGMA synchronous=OFF")
     cache_db.execute("PRAGMA journal_mode=OFF")
     return cache_db

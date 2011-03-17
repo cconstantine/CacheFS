@@ -3,7 +3,7 @@ import random
 import unittest
 import shutil
 import os
-from cachefs import FileDataCache, CacheMiss, create_db
+from cachefs import FileDataCache, CacheMiss, create_db, open_db
 cache_base = ".test_dir"
 
 try:
@@ -18,8 +18,9 @@ db = create_db(cache_base)
 class TestFileDataCache(unittest.TestCase):
     #decorator to give tests a cache object
     def setUp(self):
-        self.cache = FileDataCache(db, cache_base, os.path.join(cache_base,self._testMethodName))
         self.db = db
+        open(os.path.join(cache_base,self._testMethodName), 'a+').close()
+        self.cache = FileDataCache(self.db, os.path.join(cache_base, 'cache.db'), os.path.join(cache_base,self._testMethodName))
 
     def assertData(self, data, offset = 0):
         self.assertEqual(self.cache.read(len(data), offset), data)
@@ -63,8 +64,13 @@ class TestFileDataCache(unittest.TestCase):
         data = bytes(b'1234567890')
         seek_to = 1000000000000
         self.cache.update(data, seek_to)
+        
+        self.cache.open()
         self.cache.cache.flush()
+
         st = os.stat(self.cache.cache.name)
+        self.cache.close()
+
         self.assertTrue( seek_to > st.st_blocks * st.st_blksize)
 
 

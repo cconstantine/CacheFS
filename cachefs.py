@@ -108,14 +108,20 @@ class FileDataCache:
         self.path = path
         self.db = db
         self.cache = None
-        self.open()
+        #self.open()
 
-        self.path_id = None
+        self.node_id = None
 
-        self.db.execute('INSERT OR IGNORE INTO paths (path) values (?)', (self.path,))
+        with self.db:
+            for nid, in self.db.execute('SELECT node_id FROM paths WHERE path = ?', (self.path,)):
+                self.node_id = nid
 
-        for pid, in self.db.execute('select id from paths where path = ?', (self.path,)):
-            self.path_id = pid
+            if self.node_id == None:
+                stat = os.stat(self.path)
+                self.node_id = stat.st_ino
+                self.db.execute('INSERT OR REPLACE INTO nodes (id, last_use) values (?,?)', (self.node_id,time.time()))
+                self.db.execute('INSERT OR REPLACE INTO paths (node_id,path) values (?,?)', (self.node_id,self.path))
+            
 
         self.misses = 0
         self.hits = 0
@@ -123,7 +129,7 @@ class FileDataCache:
     def known_offsets(self):
         ret = {}
         c = self.db.cursor()
-        c.execute('select offset, end from file_data where path_id = ?', (self.path_id,))
+        c.execute('select offset, end from blocks where node_id = ?', (self.node_id,))
         for offset, end in c:
             ret[offset] = end - offset
 
@@ -153,25 +159,24 @@ class FileDataCache:
         if self.cache:
             self.cache.close()
             self.cache = None
-            self.db.commit()
 
 
     def __conditions__(self, offset, length = None):
         if length != None:
-            return ["path_id = ? AND (offset = ? OR "
+            return ["node_id = ? AND (offset = ? OR "
                     "(offset > ? AND offset <= ?) OR (offset < ? AND end >= ?))",
-                    (self.path_id,
+                    (self.node_id,
                      offset,
                      offset, offset + length,
                      offset, offset)]
         else:
-            return ["path_id = ? AND offset <= ? AND end > ?",
-                    (self.path_id,            offset,     offset)]
+            return ["node_id = ? AND offset <= ? AND end > ?",
+                    (self.node_id,            offset,     offset)]
 
     def __overlapping_block__(self, offset):
         conditions = self.__conditions__(offset)
                       
-        query = "select offset, end from file_data where %s" % conditions[0]
+        query = "select offset, end from blocks where %s" % conditions[0]
         result = self.db.execute(query, conditions[1])
         for db_offset, db_end in result:
             return (db_offset, db_end - db_offset)
@@ -181,64 +186,75 @@ class FileDataCache:
         end = offset + length
 
         conditions = self.__conditions__(offset, length)
-        query = "select min(offset), max(end) from file_data where %s" % conditions[0]
+        query = "select min(offset), max(end) from blocks where %s" % conditions[0]
         for db_offset, db_end in self.db.execute(query, conditions[1]):
             if db_offset == None or db_end == None:
                 continue
             offset = min(offset, db_offset)
             end = max(end, db_end)
 
-        self.db.execute("delete from file_data where %s" % conditions[0], conditions[1])
-        self.db.execute('insert into file_data values (?, ?, ?)', (self.path_id, offset, end))
+        with self.db:
+            self.db.execute("delete from blocks where %s" % conditions[0], conditions[1])
+            self.db.execute('insert into blocks values (?, ?, ?)', (self.node_id, offset, end))
+
 
         return
 
     def read(self, size, offset):
         #print ">>> READ (size: %s, offset: %s" % (size, offset)
-        self.open()
         (addr, s) = self.__overlapping_block__(offset)
         if addr == None or addr + s < offset + size:
             self.misses += size
             raise CacheMiss
     
         self.hits += size
+
+        self.open()
         self.cache.seek(offset)
-        return self.cache.read(size)
+        buf = self.cache.read(size)
+        self.close()
+
+        return buf
 
     def update(self, buff, offset):
         #print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
+        self.open()
         self.cache.seek(offset)
         self.cache.write(buff)
         self.__add_block___(offset, len(buff))
-
-    def release(self):
-        pass
         self.close()
 
     def truncate(self, len):
+        self.open()
         self.cache.truncate(len)
-
+        self.close()
         
-        self.db.execute("DELETE FROM file_data WHERE path_id = ? AND offset >= ?", (self.path_id, len))
-        self.db.execute("UPDATE file_data SET end = ? WHERE path_id = ? AND end > ?", (len, self.path_id, len))
+        with self.db:
+            self.db.execute("DELETE FROM blocks WHERE node_id = ? AND offset >= ?", (self.node_id, len))
+            self.db.execute("UPDATE blocks SET end = ? WHERE node_id = ? AND end > ?", (len, self.node_id, len))
+            
         return
 
-    @staticmethod
-    def unlink(cache_base, path):
+    def unlink(self):
         try:
-            shutil.rmtree(cache_base + path)
+            shutil.rmtree(self.full_path)
+            with self.db:
+                self.db.execute("DELETE FROM nodes WHERE node_id = ? ", self.node_id)
+                count = self.db.execute("SELECT COUNT(nodes.id) FROM nodes JOIN paths ON paths.path = ? AND nodes.path_id = paths.id", self.path)[0][0]
+                if count == 0:
+                    self.db.execute("DELETE FROM paths WHERE path = ?", self.path)
         except:
             pass
 
     @staticmethod
-    def rmdir(cache_base, path):
+    def rmdir(self, cache_base, path):
         try:
             shutil.rmtree(cache_base + path) 
         except:
             pass
 
     @staticmethod
-    def symlink(cache_base, target, name):
+    def symlink(self, cache_base, target, name):
         cache_target = cache_base + target
         cache_name = cache_base + name
 
@@ -249,8 +265,12 @@ class FileDataCache:
         
         os.symlink(cache_target, cache_name)
 
+#    def link(self, target, name):
+#        os.link(self._physical_path(target), self._physical_path(name))
+#        FileDataCache.link(self.cache, target, name)
+        
     @staticmethod
-    def link(cache_base, target, name):
+    def link(self, cache_base, target, name):
         cache_target = cache_base + target
         cache_name = cache_base + name
         try:
@@ -259,11 +279,25 @@ class FileDataCache:
             pass
 
         try:
-            os.makedirs(cache_target)
+            os.makedirs(os.path.dirname(cache_name))
+
         except OSError:
             pass
 
-        for f in ("file_data", "file_meta.json"):
+        #make sure target exists
+        open(cache_target, "a+").close()
+        os.link(cache_target, cache_name)
+
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO paths (path) values (?)', (self.target,))
+            self.db.execute('INSERT OR IGNORE INTO paths (path) values (?)', (self.name,))
+            
+            for pid, in self.db.execute('SELECT id FROM paths WHERE path  ?', (self.path,)):
+                path_id = pid
+
+            self.db.execute('INSERT OR IGNORE INTO nodes (path_id) values (?)', (path_id,))
+
+        for f in ("blocks", "file_meta.json"):
             target_file = os.path.join(cache_target, f)
 
             #make sure target exists
@@ -273,7 +307,7 @@ class FileDataCache:
 
 
     @staticmethod
-    def rename(cache_base, old_name, new_name):
+    def rename(self, cache_base, old_name, new_name):
         shutil.rmtree(cache_base + new_name) 
         os.rename(cache_base + old_name, cache_base + new_name)
 
@@ -292,7 +326,7 @@ def make_file_class(file_system):
             pp = file_system._physical_path(self.path)
             debug('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
             self.f = open(pp, m)
-            self.data_cache = file_system.path_cache(path)
+            self.data_cache = FileDataCache(self.cache_db, self.cache, path)
 
         def read(self, size, offset):
             try:
@@ -315,7 +349,6 @@ def make_file_class(file_system):
             debug('>> file<%s>.release()' % self.path)
             self.f.close()
             self.data_cache.report()
-            self.data_cache.release()
             return 0
 
         def flush(self):
@@ -375,7 +408,7 @@ class CacheFS(fuse.Fuse):
     def unlink(self, path):
         debug('>> unlink("%s")' % path)
         os.remove(self._physical_path(path))
-        FileDataCache.unlink(self.cache, path)
+        FileDataCache(self.cache_db, self.cache, path).unlink()
         return 0
 
     # Note: utime is deprecated in favour of utimens.
@@ -428,18 +461,47 @@ class CacheFS(fuse.Fuse):
 
         cache = FileDataCache(self.cache, path)
         cache.truncate(len)
-        cache.release()
 
+
+def open_db(cache_dir):
+    return sqlite3.connect(os.path.join(cache_dir, "metadata.db"), isolation_level="DEFERRED")
 
 def create_db(cache_dir):
+    open_db(cache_dir)
     cache_db = sqlite3.connect(os.path.join(cache_dir, "metadata.db"), isolation_level="DEFERRED")
-    cache_db.execute('create table if not exists paths (id  INTEGER PRIMARY KEY, path STRING, UNIQUE(path))')
 
-
-    cache_db.execute('create table if not exists file_data ( path_id INTEGER  not null, offset integer, end integer, FOREIGN KEY(path_id) REFERENCES paths(id) )')
-    cache_db.execute('create index if not exists meta on file_data (path_id, offset, end)') 
+    cache_db.execute("""
+CREATE TABLE IF NOT EXISTS paths (
+  id   INTEGER NOT NULL, 
+  node_id INTEGER,
+  path STRING,
+  FOREIGN KEY(node_id) REFERENCES nodes(id)
+  UNIQUE(path),
+  PRIMARY KEY(id)
+)
+"""
+                     )
+    cache_db.execute("""
+CREATE TABLE IF NOT EXISTS nodes (
+  id        INTEGER PRIMARY KEY, 
+  last_use  INTEGER
+)
+"""
+                     )
+    
+    
+    cache_db.execute("""
+CREATE TABLE IF NOT EXISTS blocks (
+  node_id INTEGER NOT NULL,
+  offset  INTEGER,
+  end     INTEGER,
+  FOREIGN KEY(node_id) REFERENCES nodes(id)
+)"""
+                     )
+#    cache_db.execute('create index if not exists meta on blocks (path_id, offset, end)') 
     cache_db.execute("PRAGMA synchronous=OFF")
     cache_db.execute("PRAGMA journal_mode=OFF")
+
     return cache_db
 
 
@@ -462,30 +524,32 @@ def main():
 
 
     server.parse(values=server, errex=1)
+#    try:
+    server.target = os.path.abspath(server.target)
     try:
-        server.target = os.path.abspath(server.target)
-        try:
-            cache_dir = server.cache
-        except:
-            import hashlib
-            cache_dir = os.path.join(os.path.expanduser("~"),
-                                     ".cachefs",
-                                     hashlib.md5(server.target).hexdigest())
-        server.multithreaded = 0
-        server.cache = os.path.abspath(cache_dir)
-        try:
-            os.mkdir(server.cache)
-        except OSError:
-            pass
-
-        server.cache_db = create_db(server)
-
+        cache_dir = server.cache
+    except:
+        import hashlib
+        cache_dir = os.path.join(os.path.expanduser("~"),
+                                 ".cachefs",
+                                 hashlib.md5(server.target).hexdigest())
+    server.multithreaded = 0
+    server.cache = os.path.abspath(cache_dir)
+    try:
+        os.mkdir(server.cache)
+    except OSError:
+        pass
+    
+    server.cache_db = create_db(cache_dir)
+    
         
 
-    except AttributeError as e:
-        print e
-        server.parser.print_help()
-        sys.exit(1)
+    #except AttributeError as e:
+    #    print e
+    #    server.parser.print_help()
+    #    sys.exit(1)
+    #except AttributeError as e:
+    #    pass
 
     print 'Setting up CacheFS %s ...' % CACHE_FS_VERSION
     print '  Target       : %s' % server.target

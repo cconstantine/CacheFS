@@ -4,8 +4,8 @@ import unittest
 import shutil
 import os
 from cachefs import FileDataCache, CacheMiss, create_db, open_db
-cache_base = ".test_dir"
-
+test_base = ".test_dir"
+cache_base = os.path.join(test_base, 'cache.db')
 try:
     shutil.rmtree(cache_base)
 except OSError:
@@ -14,13 +14,16 @@ except OSError:
 os.mkdir(cache_base)
 
 db = create_db(cache_base)
-
+test_num = 0
 class TestFileDataCache(unittest.TestCase):
     #decorator to give tests a cache object
     def setUp(self):
         self.db = db
-        open(os.path.join(cache_base,self._testMethodName), 'a+').close()
-        self.cache = FileDataCache(self.db, os.path.join(cache_base, 'cache.db'), os.path.join(cache_base,self._testMethodName))
+        filename = os.path.join(cache_base,self._testMethodName)
+        open(filename, 'a+').close()
+
+        inode_id = os.stat(filename).st_ino
+        self.cache = FileDataCache(self.db, cache_base, os.path.join(test_base,self._testMethodName), inode_id)
 
     def assertData(self, data, offset = 0):
         self.assertEqual(self.cache.read(len(data), offset), data)

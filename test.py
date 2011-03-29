@@ -11,7 +11,7 @@ try:
 except OSError:
     pass
 
-os.mkdir(cache_base)
+os.makedirs(cache_base)
 
 db = create_db(cache_base)
 test_num = 0

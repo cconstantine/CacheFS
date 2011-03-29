@@ -32,65 +32,6 @@ def flag2mode(flags):
 cache = None
 
 
-STAT_ATTRIBUTES = (
-    "st_atime", "st_blksize", "st_blocks", "st_ctime", "st_dev",
-    "st_gid", "st_ino", "st_mode", "st_mtime", "st_nlink",
-    "st_rdev", "st_size", "st_uid")
-
-class WritableStat(fuse.Stat):
-    def __init__(self, path, readonly_stat):
-        self.path = path
-        for key in STAT_ATTRIBUTES:
-            setattr(self, key, getattr(readonly_stat, key))
-
-    def __str__(self):
-        d = dict((key, str(getattr(self, key))) for key in STAT_ATTRIBUTES)
-        d['file'] = self.path
-        l = ', '.join(('%s=%s' % (k, v)) for k, v in sorted(d.items()))
-        return '>>>> %s' % l
-
-    def check_permission(self, uid, gid, flags):
-        """
-        Checks the permission of a uid:gid with given flags.
-        Returns True for allowed, False for denied.
-        flags: As described in man 2 access (Linux Programmer's Manual).
-            Either os.F_OK (test for existence of file), or ORing of
-            os.R_OK, os.W_OK, os.X_OK (test if file is readable, writable and
-            executable, respectively. Must pass all tests).
-        """
-
-        if flags == os.F_OK:
-            return True
-        user = (self.st_mode & 0700) >> 6
-        group = (self.st_mode & 070) >> 3
-        other = self.st_mode & 07
-        if uid == self.st_uid:
-            # Use "user" permissions
-            mode = user | group | other
-        elif gid == self.st_gid:
-            # Use "group" permissions
-            # XXX This will only check the user's primary group. Don't we need
-            # to check all the groups this user is in?
-            mode = group | other
-        else:
-            # Use "other" permissions
-            mode = other
-        if flags & os.R_OK:
-            if mode & os.R_OK == 0:
-                return False
-        if flags & os.W_OK:
-            if mode & os.W_OK == 0:
-                return False
-        if flags & os.X_OK:
-            if uid == 0:
-                # Root has special privileges. May execute if anyone can.
-                if mode & 0111 == 0:
-                    return False
-            else:
-                if mode & os.X_OK == 0:
-                    return False
-        return True
-
 class CacheMiss(Exception):
     def __init__(self):
         debug(">> CACHE MISS")
@@ -358,10 +299,7 @@ class CacheFS(fuse.Fuse):
            pp = self._physical_path(path)
            # Hide non-public files (except root)
 
-           st = WritableStat(path, os.lstat(pp))  # lstat to not follow symlinks
-           st.st_atime = int(time.time())
-
-           return st
+           return os.lstat(pp)
         except Exception, e:
            debug(str(e))
            raise e

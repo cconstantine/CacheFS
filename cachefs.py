@@ -129,52 +129,50 @@ class FileDataCache:
     def __overlapping_block__(self, offset):
         conditions = self.__conditions__(offset)
                       
-        query = "select offset, end from blocks where %s" % conditions[0]
+        query = "select offset, end, last_block from blocks where %s" % conditions[0]
         result = self.db.execute(query, conditions[1])
-        for db_offset, db_end in result:
-            return (db_offset, db_end - db_offset)
-        return (None, None)
+        for db_offset, db_end, last_block in result:
+            return (db_offset, db_end - db_offset, last_block)
+        return (None, None, False)
 
-    def __add_block___(self, offset, length):
+    def __add_block___(self, offset, length, last_bytes):
         end = offset + length
 
         conditions = self.__conditions__(offset, length)
         query = "select min(offset), max(end) from blocks where %s" % conditions[0]
-        for db_offset, db_end in self.db.execute(query, conditions[1]):
-            if db_offset == None or db_end == None:
-                continue
-            offset = min(offset, db_offset)
-            end = max(end, db_end)
-
         with self.db:
+            for db_offset, db_end in self.db.execute(query, conditions[1]):
+                if db_offset == None or db_end == None:
+                    continue
+                offset = min(offset, db_offset)
+                end = max(end, db_end)
+
             self.db.execute("delete from blocks where %s" % conditions[0], conditions[1])
-            self.db.execute('insert into blocks values (?, ?, ?)', (self.node_id, offset, end))
-
-
+            self.db.execute('insert into blocks values (?, ?, ?, ?)', (self.node_id, offset, end, last_bytes))
         return
 
     def read(self, size, offset):
         #print ">>> READ (size: %s, offset: %s" % (size, offset)
-        (addr, s) = self.__overlapping_block__(offset)
-        if addr == None or addr + s < offset + size:
+        (addr, s, last) = self.__overlapping_block__(offset)
+        if addr == None or (addr + s < offset + size and not last):
+            print addr, s
             self.misses += size
             raise CacheMiss
     
-        self.hits += size
-
         self.open()
         self.cache.seek(offset)
         buf = self.cache.read(size)
+        self.hits += len(buf)
         self.close()
 
         return buf
 
-    def update(self, buff, offset):
+    def update(self, buff, offset, last_bytes=False):
         #print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
         self.open()
         self.cache.seek(offset)
         self.cache.write(buff)
-        self.__add_block___(offset, len(buff))
+        self.__add_block___(offset, len(buff), last_bytes)
         self.close()
 
     def truncate(self, len):
@@ -251,14 +249,14 @@ def make_file_class(file_system):
             except CacheMiss:
                 self.f.seek(offset)
                 buf = self.f.read(size)
-                self.data_cache.update(buf, offset)
+                self.data_cache.update(buf, offset, self.f.read(1) == '')
             return buf
         
         def write(self, buf, offset):
             self.f.seek(offset)
             self.f.write(buf)
 
-            self.data_cache.update(buf, offset)
+            self.data_cache.update(buf, offset, self.f.read(1) == '')
 
             return len(buf)
 
@@ -404,7 +402,7 @@ CREATE TABLE IF NOT EXISTS paths (
                      )
     cache_db.execute("""
 CREATE TABLE IF NOT EXISTS nodes (
-  id        INTEGER PRIMARY KEY, 
+  id        INTEGER PRIMARY KEY,
   last_use  INTEGER
 )
 """
@@ -413,9 +411,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     
     cache_db.execute("""
 CREATE TABLE IF NOT EXISTS blocks (
-  node_id INTEGER NOT NULL,
-  offset  INTEGER,
-  end     INTEGER,
+  node_id    INTEGER NOT NULL,
+  offset     INTEGER,
+  end        INTEGER,
+  last_block BOOLEAN DEFAULT false,
   FOREIGN KEY(node_id) REFERENCES nodes(id)
 )"""
                      )

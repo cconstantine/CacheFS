@@ -182,7 +182,7 @@ class FileDataCache:
 
             with self.db:
                 self.db.execute("DELETE FROM blocks WHERE node_id = ? AND offset >= ?", (self.node_id, l))
-                self.db.execute("UPDATE blocks SET end = ? WHERE node_id = ? AND end > ?", (len, self.node_id, l))
+                self.db.execute("UPDATE blocks SET end = ? WHERE node_id = ? AND end > ?", (l, self.node_id, l))
         except Exception, e:
             print "Error truncating: %s" % e
         
@@ -374,7 +374,9 @@ class CacheFS(fuse.Fuse):
         f.close()
         try:
             cache = FileDataCache(self.cache_db, self.cache, path)
+            cache.open()
             cache.truncate(len)
+            cache.close()
         except:
             pass
 

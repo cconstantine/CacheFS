@@ -20,15 +20,6 @@ def debug(text):
 #    log_file.write('\n')
 #    log_file.flush()
 
-def flag2mode(flags):
-    md = {os.O_RDONLY: 'r', os.O_WRONLY: 'w', os.O_RDWR: 'w+'}
-    m = md[flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)]
-
-    if flags | os.O_APPEND:
-        m = m.replace('w', 'a', 1)
-
-    return m
-
 cache = None
 
 
@@ -41,7 +32,7 @@ class FileDataCache:
     def cache_file(self, path):
         return os.path.join(self.cachebase, "file_data") + path
 
-    def __init__(self, db, cachebase, path, node_id = None):
+    def __init__(self, db, cachebase, path, flags =  os.O_RDWR, node_id = None):
         self.cachebase = cachebase
         self.full_path = self.cache_file(path)
 
@@ -52,21 +43,30 @@ class FileDataCache:
 
         self.path = path
         self.db = db
-        self.cache = None
-        #self.open()
 
+        self.cache = None
+
+        self.flags = os.O_RDWR | ( flags &
+                                   os.O_CREAT &
+                                   os.O_EXCL )
         self.node_id = node_id
+
+        self.open()
+
+        if flags & os.O_TRUNC:
+            self.truncate(0)
 
         with self.db:
             if self.node_id != None:
                 self.db.execute('INSERT OR REPLACE INTO nodes (id, last_use) values (?,?)', (self.node_id,time.time()))
                 self.db.execute('INSERT OR REPLACE INTO paths (node_id,path) values (?,?)', (self.node_id,self.path))
             else:
-                for row in self.db.execute('SELECT node_id FROM paths WHERE path = ?', self.path):
-                    self.node_id = row['node_id']
+                for nid, in self.db.execute('SELECT node_id FROM paths WHERE path = ?', (self.path,)):
+                    self.node_id = nid
 
                 if self.node_id == None:
-                    raise Exception("Unable to find path in db and no node_id given, unable to open cache")
+                    print "Unable to find path in db and no node_id given, unable to open cache"
+                    raise CacheMiss
 
             for other_path, in self.db.execute('SELECT path FROM paths WHERE node_id = ? AND path != ?', (self.node_id, self.path)):
                 try:
@@ -91,9 +91,9 @@ class FileDataCache:
     def open(self):
         if self.cache == None:
             try:
-                self.cache = open(self.full_path, "r+")
-            except:
-                self.cache = open(self.full_path, "w+")
+                self.cache = os.open(self.full_path, self.flags)
+            except Exception, e:
+                self.cache = os.open(self.full_path, self.flags | os.O_CREAT )
 
 
     def report(self):
@@ -110,7 +110,7 @@ class FileDataCache:
 
     def close(self):
         if self.cache:
-            self.cache.close()
+            os.close(self.cache)
             self.cache = None
 
 
@@ -155,75 +155,68 @@ class FileDataCache:
         #print ">>> READ (size: %s, offset: %s" % (size, offset)
         (addr, s, last) = self.__overlapping_block__(offset)
         if addr == None or (addr + s < offset + size and not last):
-            print addr, s
             self.misses += size
             raise CacheMiss
     
-        self.open()
-        self.cache.seek(offset)
-        buf = self.cache.read(size)
+#        self.open()
+        os.lseek(self.cache, offset, os.SEEK_SET)
+        buf = os.read(self.cache, size)
         self.hits += len(buf)
-        self.close()
+#        self.close()
 
         return buf
 
     def update(self, buff, offset, last_bytes=False):
-        #print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
-        self.open()
-        self.cache.seek(offset)
-        self.cache.write(buff)
-        self.__add_block___(offset, len(buff), last_bytes)
-        self.close()
+        print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
+#        self.open()
+        os.lseek(self.cache, offset, os.SEEK_SET)
+        os.write(self.cache, buff)
 
-    def truncate(self, len):
+        self.__add_block___(offset, len(buff), last_bytes)
+#        self.close()
+
+    def truncate(self, l):
+        print ">>> TRUNCATE (cache: %s, len: %s)" % (self.cache, l)
         try:
-            self.open()
-            self.cache.truncate(len)
-            self.close()
-            
+            os.ftruncate(self.cache, l)
+
             with self.db:
-                self.db.execute("DELETE FROM blocks WHERE node_id = ? AND offset >= ?", (self.node_id, len))
-                self.db.execute("UPDATE blocks SET end = ? WHERE node_id = ? AND end > ?", (len, self.node_id, len))
+                self.db.execute("DELETE FROM blocks WHERE node_id = ? AND offset >= ?", (self.node_id, l))
+                self.db.execute("UPDATE blocks SET end = ? WHERE node_id = ? AND end > ?", (len, self.node_id, l))
         except Exception, e:
             print "Error truncating: %s" % e
         
         return
 
     def unlink(self):
-        try:
-            shutil.rmtree(self.full_path)
-            with self.db:
-                self.db.execute("DELETE FROM paths WHERE path = ?", self.path)
-                count = self.db.execute("SELECT COUNT(*) FROM paths WHERE paths.path = ? ", self.path).fetchone()[0]
-                if count == 0:
-                    self.db.execute("DELETE FROM nodes WHERE node_id = ? ", self.node_id)
+        shutil.rmtree(self.full_path)
+        with self.db:
+            self.db.execute("DELETE FROM paths WHERE path = ?", self.path)
+            count = self.db.execute("SELECT COUNT(*) FROM paths WHERE paths.path = ? ", self.path).fetchone()[0]
+            if count == 0:
+                self.db.execute("DELETE FROM nodes WHERE node_id = ? ", self.node_id)
 
+
+    @staticmethod
+    def rmdir(cache_base, path):
+        d = os.path.join(cache_base, "file_data") + path
+        try:
+            shutil.rmtree(d)
         except:
             pass
 
-    @staticmethod
-    def rmdir(self, cache_base, path):
-        try:
-            shutil.rmtree(cache_base + path) 
-        except:
-            pass
+    def rename(self, new_name):
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO paths (path) values (?)", (self.path,))
 
-    @staticmethod
-    def symlink(self, cache_base, target, name):
-        cache_target = cache_base + target
-        cache_name = cache_base + name
-
+        new_full_path = self.cache_file(new_name)
+            
         try:
-            os.makedirs(os.path.dirname(cache_name))
+            os.makedirs(os.path.dirname(new_full_path))
         except OSError:
             pass
-        
-        os.symlink(cache_target, cache_name)
 
-    @staticmethod
-    def rename(self, cache_base, old_name, new_name):
-        shutil.rmtree(cache_base + new_name) 
-        os.rename(cache_base + old_name, cache_base + new_name)
+        os.rename(self.full_path, new_full_path)
 
 
         
@@ -236,39 +229,47 @@ def make_file_class(file_system):
     
         def __init__(self, path, flags, *mode):
             self.path = path
-            m = flag2mode(flags)
-            pp = file_system._physical_path(self.path)
-            print('>> file<%s>.open(flags=%d, mode=%s)' % (pp, flags, m))
-            self.f = open(pp, m)
-            inode_id = os.stat(pp).st_ino
-            self.data_cache = FileDataCache(file_system.cache_db, file_system.cache, path, inode_id)
+            self.pp = file_system._physical_path(self.path)
+            print('>> file<%s>.open(flags=%d, mode=%s)' % (self.pp, flags, mode))
+
+            if len(mode) > 0:
+                self.f = os.open(self.pp, flags, mode[0])
+            else:
+                self.f = os.open(self.pp, flags)
+
+            inode_id = os.stat(self.pp).st_ino
+            self.data_cache = FileDataCache(file_system.cache_db, file_system.cache, path, flags, inode_id)
 
         def read(self, size, offset):
             try:
                 buf = self.data_cache.read(size, offset)
             except CacheMiss:
-                self.f.seek(offset)
-                buf = self.f.read(size)
-                self.data_cache.update(buf, offset, self.f.read(1) == '')
+                os.lseek(self.f, offset, os.SEEK_SET)
+                buf = os.read(self.f, size)
+                
+                self.data_cache.update(buf, offset, os.read(self.f, 1)=='')
             return buf
         
         def write(self, buf, offset):
-            self.f.seek(offset)
-            self.f.write(buf)
+            print('>> file<%s>.write(len(buf)=%d, offset=%s)' % (self.path, len(buf), offset))
+            os.lseek(self.f, offset, os.SEEK_SET)
+            os.write(self.f, buf)
 
-            self.data_cache.update(buf, offset, self.f.read(1) == '')
+            end = os.stat(self.pp).st_size
+            self.data_cache.update(buf, offset, offset + len(buf) == end)
 
             return len(buf)
 
 
         def release(self, flags):
-            debug('>> file<%s>.release()' % self.path)
-            self.f.close()
+            print('>> file<%s>.release()' % self.path)
+            os.close(self.f)
+            self.data_cache.close()
             self.data_cache.report()
             return 0
 
         def flush(self):
-            self.f.flush()
+            os.fsync(self.f)
 
     return CacheFile
 
@@ -281,16 +282,6 @@ class CacheFS(fuse.Fuse):
     def _physical_path(self, path):
         phys_path = os.path.join(self.target, path.lstrip('/'))
         return phys_path
-
-    def path_cache(self, path):
-        try:
-            return self.caches[path]
-        except:
-            inode_id = os.stat(path).st_ino
-            fdc = FileDataCache(self.cache_db, self.cache, path, inode_id)
-            self.caches[path] = fdc
-            return fdc
-        
     
     def getattr(self, path):
         try:
@@ -312,14 +303,14 @@ class CacheFS(fuse.Fuse):
             yield fuse.Direntry(virt_path)
 
     def readlink(self, path):
-        debug('>> readlink("%s")' % path)
+        print('>> readlink("%s")' % path)
         phys_resolved = os.readlink(self._physical_path(path))
         debug('   resolves to physical "%s"' % phys_resolved)
         return phys_resolved
 
 
     def unlink(self, path):
-        debug('>> unlink("%s")' % path)
+        print('>> unlink("%s")' % path)
         os.remove(self._physical_path(path))
         try:
             FileDataCache(self.cache_db, self.cache, path).unlink()
@@ -343,27 +334,33 @@ class CacheFS(fuse.Fuse):
         os.access(path, flags)
 
     def mkdir(self, path, mode):
+        print('>> mkdir("%s")' % path)
         path = self._physical_path(path)
         os.mkdir(path, mode)
         
     def rmdir(self, path):
+        print('>> rmdir("%s")' % path)
         os.rmdir( self._physical_path(path) )
         FileDataCache.rmdir(self.cache, path)
 
     def symlink(self, target, name):
+        print('>> symlink("%s", "%s")' % (target, name))
         os.symlink(self._physical_path(target), self._physical_path(name))
-        FileDataCache.symlink(self.cache, target, name)
 
     def link(self, target, name):
         print('>> link(%s, %s)' % (target, name))
         os.link(self._physical_path(target), self._physical_path(name))
-        FileDataCache(self.cache_db, self.cache, name, os.stat(self._physical_path(name)).st_ino)
+        FileDataCache(self.cache_db, self.cache, name, None, os.stat(self._physical_path(name)).st_ino)
 
     def rename(self, old_name, new_name):
+        print('>> rename(%s, %s)' % (old_name, new_name))
         os.rename(self._physical_path(old_name),
                   self._physical_path(new_name))
-        FileDataCache.rename(self.cache, old_name, new_name)
-        FileDataCache.rename(self.cache, old_name)
+        try:
+            fdc = FileDataCache(self.cache_db, self.cache, old_name)
+            fdc.rename(new_name)
+        except :
+            pass
         
     def chmod(self, path, mode):
         os.chmod(self._physical_path(path), mode)
@@ -376,7 +373,7 @@ class CacheFS(fuse.Fuse):
         f.truncate(len)
         f.close()
         try:
-            cache = FileDataCache(self.cache, path)
+            cache = FileDataCache(self.cache_db, self.cache, path)
             cache.truncate(len)
         except:
             pass

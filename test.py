@@ -23,7 +23,7 @@ class TestFileDataCache(unittest.TestCase):
         open(filename, 'a+').close()
 
         inode_id = os.stat(filename).st_ino
-        self.cache = FileDataCache(self.db, cache_base, os.path.join(test_base,self._testMethodName), inode_id)
+        self.cache = FileDataCache(self.db, cache_base, os.path.join(test_base,self._testMethodName), os.O_RDWR, inode_id)
 
     def assertData(self, data, offset = 0):
         self.assertEqual(self.cache.read(len(data), offset), data)
@@ -62,22 +62,6 @@ class TestFileDataCache(unittest.TestCase):
         
         self.assertData(data[1:], 1)
 
-    
-    def test_sparce_file(self):
-        data = bytes(b'1234567890')
-        seek_to = 1000000000000
-        self.cache.update(data, seek_to)
-        
-        self.cache.open()
-        self.cache.cache.flush()
-
-        st = os.stat(self.cache.cache.name)
-        self.cache.close()
-
-        self.assertTrue( seek_to > st.st_blocks * st.st_blksize)
-
-
-    
     def test_add_block_1(self):
         data1 =      b'1234567890'
         data2 = b'1234567890'

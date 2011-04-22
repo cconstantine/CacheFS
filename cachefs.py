@@ -32,7 +32,7 @@ class FileDataCache:
     def cache_file(self, path):
         return os.path.join(self.cachebase, "file_data") + path
 
-    def __init__(self, db, cachebase, path, flags =  os.O_RDWR, node_id = None):
+    def __init__(self, db, cachebase, path, flags = os.O_RDWR, node_id = None):
         self.cachebase = cachebase
         self.full_path = self.cache_file(path)
 
@@ -167,7 +167,7 @@ class FileDataCache:
         return buf
 
     def update(self, buff, offset, last_bytes=False):
-        print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
+#        print ">>> UPDATE (len: %s, offset, %s)" % (len(buff), offset)
 #        self.open()
         os.lseek(self.cache, offset, os.SEEK_SET)
         os.write(self.cache, buff)
@@ -176,7 +176,7 @@ class FileDataCache:
 #        self.close()
 
     def truncate(self, l):
-        print ">>> TRUNCATE (cache: %s, len: %s)" % (self.cache, l)
+#        print ">>> TRUNCATE (cache: %s, len: %s)" % (self.cache, l)
         try:
             os.ftruncate(self.cache, l)
 
@@ -251,7 +251,7 @@ def make_file_class(file_system):
             return buf
         
         def write(self, buf, offset):
-            print('>> file<%s>.write(len(buf)=%d, offset=%s)' % (self.path, len(buf), offset))
+#            print('>> file<%s>.write(len(buf)=%d, offset=%s)' % (self.path, len(buf), offset))
             os.lseek(self.f, offset, os.SEEK_SET)
             os.write(self.f, buf)
 
@@ -303,14 +303,14 @@ class CacheFS(fuse.Fuse):
             yield fuse.Direntry(virt_path)
 
     def readlink(self, path):
-        print('>> readlink("%s")' % path)
+#        print('>> readlink("%s")' % path)
         phys_resolved = os.readlink(self._physical_path(path))
         debug('   resolves to physical "%s"' % phys_resolved)
         return phys_resolved
 
 
     def unlink(self, path):
-        print('>> unlink("%s")' % path)
+#        print('>> unlink("%s")' % path)
         os.remove(self._physical_path(path))
         try:
             FileDataCache(self.cache_db, self.cache, path).unlink()
